@@ -322,6 +322,9 @@ def get_uploaded_files():
     files = []
     if os.path.exists(config.UPLOAD_FOLDER):
         for filename in os.listdir(config.UPLOAD_FOLDER):
+            # 排除以.开头的隐藏文件
+            if filename.startswith('.'):
+                continue
             filepath = os.path.join(config.UPLOAD_FOLDER, filename)
             if os.path.isfile(filepath):
                 stat = os.stat(filepath)
@@ -337,6 +340,9 @@ def get_output_files():
     files = []
     if os.path.exists(config.OUTPUT_FOLDER):
         for filename in os.listdir(config.OUTPUT_FOLDER):
+            # 排除以.开头的隐藏文件
+            if filename.startswith('.'):
+                continue
             filepath = os.path.join(config.OUTPUT_FOLDER, filename)
             if os.path.isfile(filepath):
                 stat = os.stat(filepath)
