@@ -138,8 +138,8 @@ SUPPORTED_LANGUAGES = [
     ('pt', '葡萄牙语')
 ]
 
-# Whisper模型列表
-WHISPER_MODELS = ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3']
+# 支持的Whisper模型
+WHISPER_MODELS = ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3', 'turbo']
 
 # GPU信息缓存
 gpu_info_cache = {}
@@ -541,13 +541,14 @@ def index():
     
     # 获取模型内存需求（根据指南计算的精确值）
     model_memory_requirements = {
-        'tiny': '0.8GB',
-        'base': '1.0GB',
-        'small': '1.5GB',
-        'medium': '2.5GB',
-        'large': '5.0GB',
-        'large-v2': '5.0GB',
-        'large-v3': '5.0GB'
+        'tiny': '~1GB',
+        'base': '~1GB',
+        'small': '~2GB',
+        'medium': '~5GB',
+        'large': '~10GB',
+        'large-v2': '~10GB',
+        'large-v3': '~10GB',
+        'turbo': '~6GB'
     }
     
     return render_template(

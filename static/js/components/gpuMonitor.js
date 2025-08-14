@@ -204,11 +204,14 @@ class GPUMonitor {
         const modelSelector = document.getElementById('modelSelector');
         const gpuSelector = document.getElementById('gpuSelector');
         const modelMemoryRequirements = {
-            'tiny': 0.8,  // GB
+            'tiny': 1.0,  // GB
             'base': 1.0,
-            'small': 1.5,
-            'medium': 2.5,
-            'large': 5.0
+            'small': 2.0,
+            'medium': 5.0,
+            'large': 10.0,
+            'large-v2': 10.0,
+            'large-v3': 10.0,
+            'turbo': 6.0
         };
         
         if (modelSelector && gpuSelector) {

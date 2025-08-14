@@ -44,11 +44,14 @@
 - 葡萄牙语 (pt)
 
 ### 模型内存需求
-- tiny: 1GB
-- base: 1GB
-- small: 2GB
-- medium: 5GB
-- large: 10GB
+- tiny: ~1GB
+- base: ~1GB
+- small: ~2GB
+- medium: ~5GB
+- large: ~10GB
+- large-v2: ~10GB
+- large-v3: ~10GB
+- turbo: ~6GB (推荐，速度快)
 
 ### GPU支持
 - 系统会自动检测可用的GPU

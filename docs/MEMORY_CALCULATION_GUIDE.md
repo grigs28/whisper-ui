@@ -33,6 +33,7 @@
 | small | 244M | 3.0GB | 1.5GB | 0.75GB | 0.375GB |
 | medium | 769M | 5.0GB | 2.5GB | 1.25GB | 0.625GB |
 | large/large-v2/large-v3 | 1550M | 10.0GB | 5.0GB | 2.5GB | 1.25GB |
+| turbo | 809M | 6.0GB | 3.0GB | 1.5GB | 0.75GB |
 
 #### 2. 音频处理显存
 

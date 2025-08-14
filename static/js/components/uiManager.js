@@ -199,11 +199,14 @@ class UIManager {
         if (modelSelector && modelMemoryElement) {
             const selectedModel = modelSelector.value;
             const modelMemoryRequirements = {
-                'tiny': '0.8GB',
-                'base': '1.0GB',
-                'small': '1.5GB',
-                'medium': '2.5GB',
-                'large': '5.0GB'
+                'tiny': '~1GB',
+                'base': '~1GB',
+                'small': '~2GB',
+                'medium': '~5GB',
+                'large': '~10GB',
+                'large-v2': '~10GB',
+                'large-v3': '~10GB',
+                'turbo': '~6GB'
             };
             
             if (modelMemoryRequirements[selectedModel]) {

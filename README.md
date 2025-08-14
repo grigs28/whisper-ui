@@ -38,7 +38,35 @@
 
 - Python 3.8+
 - pip
+- FFmpeg（音频处理依赖）
 - （可选）NVIDIA GPU + CUDA 支持
+
+#### FFmpeg 安装
+
+**openEuler、Ubuntu 或 Debian:**
+```bash
+sudo apt update && sudo apt install ffmpeg
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S ffmpeg
+```
+
+**macOS (使用 Homebrew):**
+```bash
+brew install ffmpeg
+```
+
+**Windows (使用 Chocolatey):**
+```bash
+choco install ffmpeg
+```
+
+**Windows (使用 Scoop):**
+```bash
+scoop install ffmpeg
+```
 
 ### 🔧 安装步骤
 
@@ -72,7 +100,7 @@
    - 支持多文件同时上传
 
 2. **选择转录参数**
-   - 模型选择：tiny, base, small, medium, large
+   - 模型选择：tiny, base, small, medium, large, large-v2, large-v3, turbo
    - 语言选择：自动检测或手动指定
    - 输出格式：TXT, SRT, VTT, JSON
 
@@ -149,6 +177,7 @@ whisper-ui/
 
 3. **转录速度慢**
    - 使用更小的模型（如tiny或base）
+   - 推荐使用turbo模型（平衡速度和精度）
    - 确保GPU正常工作
    - 检查系统资源使用情况
 
@@ -208,6 +237,40 @@ This AI-collaborative development approach ensures the perfect balance between c
 - 🎨 **Modern Interface**: Responsive design with drag-and-drop upload
 - 🔄 **WebSocket Communication**: Real-time progress updates
 - 📝 **Comprehensive Logging**: Detailed operation logs and error tracking
+
+**📋 Requirements**
+
+- Python 3.8+
+- pip
+- FFmpeg (audio processing dependency)
+- (Optional) NVIDIA GPU + CUDA support
+
+**FFmpeg Installation**
+
+**openEuler, Ubuntu or Debian:**
+```bash
+sudo apt update && sudo apt install ffmpeg
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S ffmpeg
+```
+
+**macOS (using Homebrew):**
+```bash
+brew install ffmpeg
+```
+
+**Windows (using Chocolatey):**
+```bash
+choco install ffmpeg
+```
+
+**Windows (using Scoop):**
+```bash
+scoop install ffmpeg
+```
 
 **🚀 Quick Start**
 

@@ -1,5 +1,28 @@
 # Whisper音频转录系统 版本历史
 
+## v0.0.4 (2025-08-14)
+
+### 新增功能
+- 添加 turbo 模型支持，平衡速度和精度
+- 新增 FFmpeg 系统依赖安装指南
+- 支持多操作系统 FFmpeg 安装说明（openEuler、Ubuntu、Debian、Arch Linux、macOS、Windows）
+- 完善模型内存需求显示功能
+
+### 改进
+- 修复模型内存需求显示为"--"的问题
+- 更新所有模型的显存需求配置
+- 完善前端模型选择器的内存需求映射
+- 优化 README 文档，添加详细的环境配置说明
+- 设置 turbo 为默认推荐模型
+
+### 技术改进
+- 更新 main.py 中的 WHISPER_MODELS 列表
+- 完善 gpuMonitor.js 和 uiManager.js 中的模型内存需求配置
+- 同步更新 .env 和 .env.sample 配置文件
+- 更新相关文档（MEMORY_CALCULATION_GUIDE.md、USAGE_INSTRUCTIONS.md）
+
+---
+
 ## v0.0.3 (2025-01-XX)
 
 ### 新增功能

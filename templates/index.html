@@ -91,7 +91,7 @@
                             <label for="modelSelector" class="form-label">模型选择</label>
                             <select class="form-select" id="modelSelector">
                                 {% for model in whisper_models %}
-                                <option value="{{ model }}" {% if model == 'base' %}selected{% endif %}>
+                                <option value="{{ model }}" {% if model == 'turbo' %}selected{% endif %}>
                                     {{ model }}{% if model in model_memory_requirements %} ({{ model_memory_requirements[model] }}){% endif %}
                                 </option>
                                 {% endfor %}
