@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Whisper 音频转录系统</title>
+    <!-- Bootstrap CSS -->
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Font Awesome -->
+    <link href="/static/css/all.min.css" rel="stylesheet">
+    <!-- 自定义CSS -->
+    <link href="/static/css/index.css" rel="stylesheet">
+</head>
+<body>
+    <!-- 导航栏 -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="#">
+                <i class="fas fa-microphone-alt"></i> Whisper 音频转录系统
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#readmeModal">
+                            <i class="fas fa-book"></i> 说明
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#versionModal">
+                            <i class="fas fa-info-circle"></i> <span id="navVersionNumber">版本</span>
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- 页面内容 -->
+    <div class="container-fluid mt-4">
+        <!-- GPU状态显示区域（右对齐） -->
+        <div class="gpu-status-container">
+            <div class="gpu-status-info" id="gpuStatusInfo">
+                <i class="fas fa-microchip"></i> GPU状态: <span id="gpuStatusText">正在检查...</span>
+                <span class="badge bg-secondary" id="gpuMemoryText"></span>
+                <span class="badge bg-info ms-1" id="gpuTempText"><i class="fas fa-thermometer-half"></i> <span id="headerGpuTemperature">--°C</span></span>
+            </div>
+        </div>
+        
+        <div class="row mb-3">
+            <!-- 第一行：文件上传、转录设置、任务队列 -->
+            <div class="col-md-4">
+                <!-- 文件上传区域 -->
+                <div class="card h-100">
+                    <div class="card-header">
+                        <h5 class="mb-0">
+                            <i class="fas fa-upload"></i> 文件上传
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <!-- 拖拽上传区域 -->
+                        <div id="dropArea" class="drop-area border border-dashed rounded p-5 text-center mb-3">
+                            <i class="fas fa-cloud-upload-alt fa-3x text-muted mb-3"></i>
+                            <p class="lead">拖拽文件到这里或点击选择文件</p>
+                            <p class="text-muted">支持MP3、WAV、FLAC等音频格式</p>
+                            <input type="file" id="fileInput" class="d-none" multiple accept="audio/*">
+                        </div>
+                        
+                        <!-- 上传进度条 -->
+                        <div id="uploadProgress" class="progress mb-3" style="display: none;">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%">
+                                <span class="progress-text">0%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-4">
+                <!-- 转录设置 -->
+                <div class="card h-100">
+                    <div class="card-header">
+                        <h5 class="mb-0">
+                            <i class="fas fa-cog"></i> 转录设置
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="modelSelector" class="form-label">模型选择</label>
+                            <select class="form-select" id="modelSelector">
+                                {% for model in whisper_models %}
+                                <option value="{{ model }}" {% if model == 'base' %}selected{% endif %}>
+                                    {{ model }}{% if model in model_memory_requirements %} ({{ model_memory_requirements[model] }}){% endif %}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <div class="mt-2">
+                                <small class="text-muted">当前模型内存需求: <span id="modelMemoryInfo">--</span></small>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="languageSelector" class="form-label">转录语言</label>
+                            <select class="form-select" id="languageSelector">
+                                <option value="auto">自动检测</option>
+                                {% for code, name in languages %}
+                                <option value="{{ code }}">{{ name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="gpuSelector" class="form-label">GPU选择</label>
+                            <select class="form-select" id="gpuSelector">
+                                <option value="">使用CPU</option>
+                                {% for gpu in gpus %}
+                                <option value="{{ gpu.id }}" {% if gpu.id == default_gpu_id %}selected{% endif %}>
+                                    GPU {{ gpu.id }}: {{ gpu.name }} (空闲: {{ "%.1f"|format(gpu.memory_free / 1024**3) }}GB)
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="outputFormatSelector" class="form-label">输出格式</label>
+                            <select class="form-select" id="outputFormatSelector">
+                                <option value="json">JSON格式</option>
+                                <option value="txt" selected>纯文本格式</option>
+                                <option value="js">JavaScript格式</option>
+                            </select>
+                            <small class="text-muted">选择转录结果的输出格式</small>
+                        </div>
+                        
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-4">
+                <!-- 任务队列 -->
+                <div class="card h-100">
+                    <div class="card-header">
+                        <h5 class="mb-0">
+                            <i class="fas fa-tasks"></i> 任务队列 
+                            <span class="badge bg-secondary" id="queueBadge">0</span>
+                        </h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <div id="queueInfo" class="text-center py-2 bg-light">
+                            空闲
+                        </div>
+                        <div id="queueItems" class="p-2" style="max-height: 280px; overflow-y: auto;">
+                            <!-- 队列项将在这里动态添加 -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="row mb-3">
+            <!-- 第二行：上传的文件、转录结果 -->
+            <div class="col-md-6">
+                <!-- 上传文件列表 -->
+                <div class="card h-100">
+                    <div class="card-header">
+                        <h5 class="mb-0">
+                            <i class="fas fa-file-audio"></i> 上传文件
+                            <span class="badge bg-secondary">{{ uploaded_files|length }}</span>
+                        </h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <!-- 操作按钮 -->
+                        <div class="d-flex justify-content-between p-2 border-bottom">
+                            <div>
+                                <button class="btn btn-outline-primary btn-sm" id="selectAllUploaded">
+                                    <i class="fas fa-check-square"></i> 全选
+                                </button>
+                                <button class="btn btn-outline-danger btn-sm" id="deleteSelectedUploaded">
+                                    <i class="fas fa-trash"></i> 删除选中
+                                </button>
+                            </div>
+                            <div>
+                                <button class="btn btn-success btn-sm" id="startTranscriptionBtn">
+                                    <i class="fas fa-sync-alt"></i> 开始转录
+                                </button>
+                            </div>
+                        </div>
+                        
+                        {% if uploaded_files %}
+                        <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
+                            <table id="uploadedFilesTable" class="table table-hover mb-0">
+                                <thead>
+                                    <tr>
+                                        <th width="5%">
+                                            <input type="checkbox" id="uploadedFileSelectAll">
+                                        </th>
+                                        <th>文件名</th>
+                                        <th>大小</th>
+                                        <th>修改时间</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for file in uploaded_files %}
+                                    <tr>
+                                        <td>
+                                            <input type="checkbox" class="uploaded-file-checkbox" value="{{ file.name }}">
+                                        </td>
+                                        <td>{{ file.name }}</td>
+                                        <td>{{ file.size|filesizeformat }}</td>
+                                        <td>{{ file.modified.strftime('%Y-%m-%d %H:%M') }}</td>
+                                        <td>
+                                            <div class="btn-group btn-group-sm" role="group">
+                                                <button class="btn btn-outline-primary play-btn" data-filename="{{ file.name }}">
+                                                    <i class="fas fa-play"></i> 
+                                                </button>
+                                                <a href="/download/upload/{{ file.name }}" class="btn btn-outline-success">
+                                                    <i class="fas fa-download"></i>
+                                                </a>
+                                                <button class="btn btn-outline-danger" onclick="deleteUploadedFile('{{ file.name }}')">
+                                                    <i class="fas fa-trash"></i>
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% else %}
+                        <div class="text-center py-4">
+                            <i class="fas fa-inbox fa-2x text-muted mb-2"></i>
+                            <p class="text-muted">暂无上传的文件</p>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-6">
+                <!-- 输出文件列表 -->
+                <div class="card h-100">
+                    <div class="card-header">
+                        <h5 class="mb-0">
+                            <i class="fas fa-file-export"></i> 转录结果
+                            <span class="badge bg-secondary">{{ output_files|length }}</span>
+                        </h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <!-- 操作按钮 -->
+                        <div class="d-flex justify-content-between p-2 border-bottom">
+                            <div>
+                                <button class="btn btn-outline-primary btn-sm" id="selectAllOutput">
+                                    <i class="fas fa-check-square"></i> 全选
+                                </button>
+                                <button class="btn btn-outline-danger btn-sm" id="deleteSelectedOutput">
+                                    <i class="fas fa-trash"></i> 删除选中
+                                </button>
+                                <button class="btn btn-outline-success btn-sm" id="downloadAllOutput">
+                                    <i class="fas fa-download"></i> 打包下载
+                                </button>
+                            </div>
+                        </div>
+                        
+                        {% if output_files %}
+                        <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
+                            <table id="outputFilesTable" class="table table-hover mb-0">
+                                <thead>
+                                    <tr>
+                                        <th width="5%">
+                                            <input type="checkbox" id="outputFileSelectAll">
+                                        </th>
+                                        <th>文件名</th>
+                                        <th>大小</th>
+                                        <th>修改时间</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for file in output_files %}
+                                    <tr>
+                                        <td>
+                                            <input type="checkbox" class="output-file-checkbox" value="{{ file.name }}">
+                                        </td>
+                                        <td>{{ file.name }}</td>
+                                        <td>{{ file.size|filesizeformat }}</td>
+                                        <td>{{ file.modified.strftime('%Y-%m-%d %H:%M') }}</td>
+                                        <td>
+                                            <div class="btn-group btn-group-sm" role="group">
+                                                <a href="/download/output/{{ file.name }}" class="btn btn-outline-success">
+                                                    <i class="fas fa-download"></i>
+                                                </a>
+                                                <button class="btn btn-outline-danger" onclick="deleteOutputFile('{{ file.name }}')">
+                                                    <i class="fas fa-trash"></i>
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% else %}
+                        <div class="text-center py-4">
+                            <i class="fas fa-inbox fa-2x text-muted mb-2"></i>
+                            <p class="text-muted">暂无转录结果</p>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+<div class="row">
+            <!-- 第三行：运行日志 -->
+            <div class="col-md-12">
+                <div class="card h-100">
+                    <div class="card-header">
+                        <h5 class="mb-0 d-flex justify-content-between align-items-center">
+                            <span><i class="fas fa-list"></i> 运行日志</span>
+                            <button class="btn btn-sm btn-outline-secondary" id="toggleLogBtn" onclick="toggleLogPanel()">
+                                <i class="fas fa-chevron-up" id="logToggleIcon"></i>
+                            </button>
+                        </h5>
+                    </div>
+                    <div class="card-body p-0" id="logPanel">
+                        <div id="logContainer" class="p-3" style="height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.8em;">
+                            <!-- 日志将在这里动态添加 -->
+                        </div>
+                        <div class="card-footer">
+                            <div class="d-flex justify-content-between">
+                                <button class="btn btn-outline-secondary btn-sm" id="clearLogsBtn">
+                                    <i class="fas fa-trash-alt"></i> 清除日志
+                                </button>
+                                <button class="btn btn-outline-secondary btn-sm" onclick="scrollToBottom()">
+                                    <i class="fas fa-arrow-down"></i> 滚动到底部
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 音频播放器模态框 -->
+    <div class="modal fade" id="audioPlayerModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-body" id="audioPlayerModalBody">
+                    <!-- 音频播放器内容将由JavaScript动态创建 -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- README模态框 -->
+    <div class="modal fade" id="readmeModal" tabindex="-1">
+        <div class="modal-dialog modal-md">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">
+                        <i class="fas fa-book"></i> 说明
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
+                    <div id="readmeContent">
+                        <!-- README内容将在这里加载 -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 模型下载进度模态框 -->
+    <div class="modal fade" id="downloadProgressModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+        <div class="modal-dialog modal-md">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">
+                        <i class="fas fa-download"></i> 模型下载中
+                    </h5>
+                    <!-- 不显示关闭按钮，使弹窗不可取消 -->
+                </div>
+                <div class="modal-body text-center">
+                    <div class="mb-3">
+                        <i class="fas fa-cloud-download-alt fa-3x text-info mb-3"></i>
+                        <h6 id="downloadModelName">正在下载模型...</h6>
+                        <p class="text-muted" id="downloadDescription">首次使用该模型需要下载，请耐心等待</p>
+                    </div>
+                    
+                    <!-- 下载进度条 -->
+                    <div class="progress mb-3" style="height: 20px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated bg-info" 
+                             role="progressbar" 
+                             style="width: 0%" 
+                             id="downloadProgressBar"
+                             aria-valuenow="0" 
+                             aria-valuemin="0" 
+                             aria-valuemax="100">
+                            <span id="downloadProgressText">0%</span>
+                        </div>
+                    </div>
+                    
+                    <!-- 下载状态信息 -->
+                    <div class="d-flex justify-content-between align-items-center">
+                        <small class="text-muted" id="downloadStatus">准备下载...</small>
+                        <small class="text-muted" id="downloadSpeed"></small>
+                    </div>
+                    
+                    <!-- 提示信息 -->
+                    <div class="alert alert-info mt-3 mb-0">
+                        <i class="fas fa-info-circle"></i>
+                        <small>下载完成后将自动开始转录，请勿关闭浏览器</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 版本信息模态框 -->
+    <div class="modal fade" id="versionModal" tabindex="-1">
+        <div class="modal-dialog modal-md">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title">
+                        <i class="fas fa-info-circle"></i> <span id="versionTitle">版本</span>
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
+                    <div class="text-center mb-3">
+                        <h4>Whisper 音频转录系统</h4>
+                        <p class="text-muted">当前版本 <span id="versionNumber">-</span></p>
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="showVersionHistory">
+                            <i class="fas fa-history"></i> 查看版本历史
+                        </button>
+                    </div>
+                    <div id="versionContent">
+                        <!-- 版本信息将在这里加载 -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Bootstrap JS -->
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+    <!-- Socket.IO -->
+    <script src="/static/js/socket.io.min.js"></script>
+    <!-- 自定义JavaScript -->
+    <script src="/static/js/utils/helpers.js"></script>
+    <script src="/static/js/utils/statusLogger.js"></script>
+    <script src="/static/js/components/websocket.js"></script>
+    <script src="/static/js/components/fileManager.js"></script>
+    <script src="/static/js/components/audioPlayer.js"></script>
+    <script src="/static/js/components/transcriptionController.js"></script>
+    <script src="/static/js/components/gpuMonitor.js"></script>
+    <script src="/static/js/components/versionManager.js"></script>
+    <script src="/static/js/components/queueManager.js"></script>
+    <script src="/static/js/components/uiManager.js"></script>
+    <script src="/static/js/app.js"></script>
+    
+    <script>
+        // 初始化应用
+        document.addEventListener('DOMContentLoaded', function() {
+            // 初始化状态日志
+            // statusLogger.init(); // 已经在StatusLogger构造函数中初始化了
+            // 无需再次调用
+            // 初始化WebSocket连接
+            // wsManager.init(); // 已经在WebSocketManager构造函数中初始化了
+            // 无需再次调用
+            // 初始化GPU监控
+            // GPU监控会自动开始
+            // 初始化队列管理器
+            // 队列管理器会自动加载状态
+            // 初始化UI管理器
+            // UI管理器会自动处理事件
+        });
+    </script>
+    
+    <script>
+        // 文件上传处理
+        document.addEventListener('DOMContentLoaded', function() {
+            const dropArea = document.getElementById('dropArea');
+            const fileInput = document.getElementById('fileInput');
+            
+            // 为拖拽区域添加事件监听器
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                dropArea.addEventListener(eventName, preventDefaults, false);
+            });
+            
+            // 处理文件拖拽
+            dropArea.addEventListener('drop', handleDrop, false);
+            
+            // 处理文件选择点击
+            dropArea.addEventListener('click', function() {
+                fileInput.click();
+            });
+            
+            // 处理文件选择
+            fileInput.addEventListener('change', handleFileSelect, false);
+        });
+        
+        // 为全选按钮添加切换功能
+        // 注意：这部分逻辑已在fileManager.js中实现，这里不再重复绑定
+        // 保留此注释供参考
+        
+        // 阻止默认行为
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        
+        // 处理拖拽文件
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            handleFiles(files);
+        }
+        
+        // 处理文件选择
+        function handleFileSelect(e) {
+            const files = e.target.files;
+            handleFiles(files);
+        }
+        
+        // 处理文件上传
+        function handleFiles(files) {
+            if (files.length > 0) {
+                fileManager.handleFiles(files);
+            }
+        }
+    </script>
+    
+    <script>
+        // 滚动到底部函数
+        function scrollToBottom() {
+            const logContainer = document.getElementById('logContainer');
+            if (logContainer) {
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+        }

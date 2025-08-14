@@ -1,0 +1,22 @@
+# 项目依赖包
+
+# Web框架
+Flask==2.3.3
+Flask-SocketIO==5.3.6
+
+# 音频处理和AI
+torch>=2.1.0
+torchaudio>=2.1.0
+openai-whisper==20231117
+
+# 工具
+Werkzeug==2.3.7
+python-dotenv==1.0.0
+
+# 日志
+logging==0.4.9.9
+
+# 其他
+requests==2.31.0
+markdown==3.5.1
+opencc==1.1.9
