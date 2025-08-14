@@ -13,8 +13,7 @@ openai-whisper==20231117
 Werkzeug==2.3.7
 python-dotenv==1.0.0
 
-# 日志
-logging==0.4.9.9
+# 日志 (Python内置模块，无需安装)
 
 # 其他
 requests==2.31.0
