@@ -86,44 +86,64 @@ class FileManager {
      * 切换全选
      */
     toggleSelectAll(type) {
-        const checkboxes = document.querySelectorAll(`.${type}-file-checkbox`);
-        const selectAllCheckbox = document.querySelector(`#${type}FileSelectAll`);
-        const isChecked = selectAllCheckbox?.checked || false;
-        
-        // 正确的逻辑：如果当前是选中状态，则取消全选；否则全选
-        const shouldCheckAll = !isChecked;
-        
-        checkboxes.forEach(checkbox => {
-            checkbox.checked = shouldCheckAll;
-            if (type === 'uploaded') {
-                if (shouldCheckAll) {
-                    this.selectedFiles.add(checkbox.value);
-                } else {
-                    this.selectedFiles.delete(checkbox.value);
+        try {
+            const checkboxes = document.querySelectorAll(`.${type}-file-checkbox`);
+            const selectAllCheckbox = document.querySelector(`#${type}FileSelectAll`);
+            const isChecked = selectAllCheckbox?.checked || false;
+            
+            // 正确的逻辑：如果当前是选中状态，则取消全选；否则全选
+            const shouldCheckAll = !isChecked;
+            
+            checkboxes.forEach(checkbox => {
+                checkbox.checked = shouldCheckAll;
+                if (type === 'uploaded') {
+                    if (shouldCheckAll) {
+                        this.selectedFiles.add(checkbox.value);
+                    } else {
+                        this.selectedFiles.delete(checkbox.value);
+                    }
                 }
+            });
+            
+            // 更新全选按钮状态
+            if (selectAllCheckbox) {
+                selectAllCheckbox.checked = shouldCheckAll;
             }
-        });
-        
-        // 更新全选按钮状态
-        if (selectAllCheckbox) {
-            selectAllCheckbox.checked = shouldCheckAll;
+            this.updateSelectAllButton();
+        } catch (error) {
+            statusLogger.error('切换全选时发生错误', { error: error.message });
         }
-        this.updateSelectAllButton();
     }
 
     /**
      * 更新全选按钮状态
      */
     updateSelectAllButton() {
-        const selectAllCheckbox = document.getElementById('uploadedFileSelectAll');
-        const checkboxes = document.querySelectorAll('.uploaded-file-checkbox');
-        const checkedCount = this.selectedFiles.size;
-        const totalCount = checkboxes.length;
+        try {
+            // 延迟执行，确保DOM完全更新
+            setTimeout(() => {
+                try {
+                    const selectAllCheckbox = document.getElementById('uploadedFileSelectAll');
+                    // 检查元素是否存在
+                    if (!selectAllCheckbox) {
+                        statusLogger.warning('未找到上传文件全选复选框元素');
+                        return;
+                    }
+                    const checkboxes = document.querySelectorAll('.uploaded-file-checkbox');
+                    const checkedCount = this.selectedFiles.size;
+                    const totalCount = checkboxes.length;
 
-        if (totalCount > 0) {
-            selectAllCheckbox.checked = checkedCount === totalCount;
-        } else {
-            selectAllCheckbox.checked = false;
+                    if (totalCount > 0) {
+                        selectAllCheckbox.checked = checkedCount === totalCount;
+                    } else {
+                        selectAllCheckbox.checked = false;
+                    }
+                } catch (error) {
+                    statusLogger.error('更新全选按钮状态时发生错误', { error: error.message });
+                }
+            }, 0);
+        } catch (error) {
+            statusLogger.error('更新全选按钮状态时发生错误', { error: error.message });
         }
     }
 
@@ -147,7 +167,7 @@ class FileManager {
             }
         });
         this.updateSelectAllButton();
-        console.log(`Selected ${selectedCount} newly uploaded files:`, filenames);
+        statusLogger.system(`Selected ${selectedCount} newly uploaded files: ${filenames.join(', ')}`);
     }
 
     /**
@@ -236,6 +256,11 @@ class FileManager {
                 
                 // 在列表刷新后选择新上传的文件
                 this.selectNewlyUploadedFiles(result.filenames);
+                
+                // 刷新任务队列框，显示队列中的文件
+                if (typeof queueManager !== 'undefined') {
+                    queueManager.loadQueueState();
+                }
             } else {
                 statusLogger.error('文件上传失败', result);
                 showNotification(`上传失败: ${result.error}`, 'danger');
@@ -269,31 +294,75 @@ class FileManager {
         }
 
         try {
-            for (const filename of filenames) {
-                const response = await fetch(`/delete_${type}/${encodeURIComponent(filename)}`, {
-                    method: 'DELETE'
-                });
-                
-                const result = await response.json();
-                
-                if (result.success) {
-                    statusLogger.success(`${type === 'uploaded' ? '上传' : '输出'}文件已删除`, { filename });
-                    showNotification(`${type === 'uploaded' ? '上传' : '输出'}文件已删除`, 'success');
-                } else {
-                    statusLogger.error(`${type === 'uploaded' ? '上传' : '输出'}文件删除失败`, { filename, error: result.error });
-                    showNotification(`${type === 'uploaded' ? '上传' : '输出'}文件删除失败`, 'danger');
+            statusLogger.system(`开始批量删除${type === 'uploaded' ? '上传' : '输出'}文件`, { filenames });
+            
+            // 批量删除文件，提高效率
+            const deletePromises = filenames.map(async (filename) => {
+                try {
+                    const response = await fetch(`/delete_${type}/${encodeURIComponent(filename)}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        statusLogger.success(`${type === 'uploaded' ? '上传' : '输出'}文件已删除`, { filename });
+                        return { filename, success: true };
+                    } else {
+                        statusLogger.error(`${type === 'uploaded' ? '上传' : '输出'}文件删除失败`, { filename, error: result.error });
+                        return { filename, success: false, error: result.error };
+                    }
+                } catch (error) {
+                    statusLogger.error(`${type === 'uploaded' ? '上传' : '输出'}文件删除时发生错误`, { filename, error: error.message });
+                    return { filename, success: false, error: error.message };
                 }
+            });
+            
+            // 等待所有删除操作完成
+            const results = await Promise.all(deletePromises);
+            
+            // 检查是否有删除失败的文件
+            const failedDeletes = results.filter(result => !result.success);
+            const successDeletes = results.filter(result => result.success);
+            
+            if (failedDeletes.length > 0) {
+                statusLogger.warning(`删除操作完成，成功删除 ${successDeletes.length} 个文件，失败 ${failedDeletes.length} 个文件`, { failedFiles: failedDeletes });
+                showNotification(`删除完成：成功 ${successDeletes.length} 个，失败 ${failedDeletes.length} 个`, 'warning');
+            } else {
+                statusLogger.success(`成功删除 ${filenames.length} 个文件`, { filenames });
+                showNotification(`成功删除 ${filenames.length} 个文件`, 'success');
             }
             
-            // 重新加载文件列表 - 改为使用refreshFileList方法，只刷新对应类型的列表
+            // 从选中文件集合中移除已删除的文件
+            if (type === 'uploaded') {
+                successDeletes.forEach(result => {
+                    this.selectedFiles.delete(result.filename);
+                });
+            }
+            
+            // 重新加载文件列表 - 只刷新一次，提高性能
             await this.refreshFileList(type);
+            
             // 清空选中文件集合
             this.selectedFiles.clear();
             // 更新全选按钮状态
             this.updateSelectAllButton();
+            
+            statusLogger.system(`批量删除${type === 'uploaded' ? '上传' : '输出'}文件完成`, { successCount: successDeletes.length, failCount: failedDeletes.length });
+            
         } catch (error) {
             statusLogger.error('删除文件时发生错误', { error: error.message });
-            showNotification('删除文件时发生错误', 'danger');
+            showNotification('删除文件时发生错误，请重试', 'danger');
+            // 即使发生错误也要尝试刷新列表，确保UI同步
+            try {
+                await this.refreshFileList(type);
+            } catch (refreshError) {
+                statusLogger.error('刷新文件列表失败', { error: refreshError.message });
+            }
         }
     }
 
@@ -302,20 +371,58 @@ class FileManager {
      */
     async refreshFileList(type) {
         try {
+            statusLogger.system(`开始刷新${type === 'uploaded' ? '上传' : '输出'}文件列表`);
+            console.log(`[FileManager] 开始刷新${type === 'uploaded' ? '上传' : '输出'}文件列表`);
+            
             // 根据类型获取对应的文件列表
             const response = await fetch(`/${type === 'uploaded' ? 'uploaded' : 'output'}_files`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
             const result = await response.json();
             
-            if (result.success) {
-                // 更新对应的文件列表
-                if (type === 'uploaded') {
-                    this.updateUploadedFileList(result.files);
-                } else {
-                    this.updateOutputFileList(result.files);
-                }
+            // 更新对应的文件列表
+            if (type === 'uploaded') {
+                statusLogger.system('准备更新上传文件列表');
+                await this.updateUploadedFileList(result.files || []);
+                statusLogger.system('上传文件列表更新完成');
+            } else {
+                statusLogger.system('准备更新输出文件列表');
+                await this.updateOutputFileList(result.files || []);
+                statusLogger.system('输出文件列表更新完成');
             }
+            
+            // 更新页面标题中的文件数量
+            this.updateFileCountBadges();
+            
+            statusLogger.system(`${type === 'uploaded' ? '上传' : '输出'}文件列表刷新完成`);
         } catch (error) {
             statusLogger.error('刷新文件列表失败', { error: error.message });
+            showNotification('刷新文件列表失败，请刷新页面重试', 'danger');
+        }
+    }
+    
+    /**
+     * 更新文件数量徽章
+     */
+    updateFileCountBadges() {
+        try {
+            // 更新上传文件数量徽章
+            const uploadedBadge = document.querySelector('.col-md-6:first-child .card-header .badge');
+            const uploadedCheckboxes = document.querySelectorAll('.uploaded-file-checkbox');
+            if (uploadedBadge) {
+                uploadedBadge.textContent = uploadedCheckboxes.length;
+            }
+            
+            // 更新输出文件数量徽章
+            const outputBadge = document.querySelector('.col-md-6:last-child .card-header .badge');
+            const outputCheckboxes = document.querySelectorAll('.output-file-checkbox');
+            if (outputBadge) {
+                outputBadge.textContent = outputCheckboxes.length;
+            }
+        } catch (error) {
+            statusLogger.error('更新文件数量徽章失败', { error: error.message });
         }
     }
 
@@ -323,177 +430,222 @@ class FileManager {
      * 更新上传文件列表
      */
     updateUploadedFileList(files) {
-        // 查找上传文件表格的容器
-        const uploadedContainer = document.querySelector('.col-md-6:first-child .card-body');
-        if (!uploadedContainer) return;
-        
-        // 保留操作按钮区域
-        const operationButtons = uploadedContainer.querySelector('.d-flex.justify-content-between');
-        
-        // 清空除操作按钮外的内容
-        uploadedContainer.innerHTML = '';
-        if (operationButtons) {
-            uploadedContainer.appendChild(operationButtons);
-        }
-        
-        if (files.length === 0) {
-            const emptyDiv = document.createElement('div');
-            emptyDiv.className = 'text-center py-4';
-            emptyDiv.innerHTML = `
-                <i class="fas fa-inbox fa-2x text-muted mb-2"></i>
-                <p class="text-muted">暂无上传的文件</p>
+        try {
+            // 查找上传文件表格的容器
+            const uploadedContainer = document.querySelector('.col-md-6:first-child .card-body');
+            if (!uploadedContainer) {
+                statusLogger.error('未能找到上传文件容器');
+                return;
+            }
+            
+            statusLogger.system('找到上传文件容器，开始更新内容');
+            
+            // 保留操作按钮区域
+            const operationButtons = uploadedContainer.querySelector('.d-flex.justify-content-between');
+            
+            // 清空除操作按钮外的内容
+            uploadedContainer.innerHTML = '';
+            if (operationButtons) {
+                uploadedContainer.appendChild(operationButtons);
+            }
+            
+            if (files.length === 0) {
+                const emptyDiv = document.createElement('div');
+                emptyDiv.className = 'text-center py-4';
+                emptyDiv.innerHTML = `
+                    <i class="fas fa-inbox fa-2x text-muted mb-2"></i>
+                    <p class="text-muted">暂无上传的文件</p>
+                `;
+                uploadedContainer.appendChild(emptyDiv);
+                statusLogger.system('上传文件列表为空');
+                return;
+            }
+            
+            // 创建表格容器
+            const tableContainer = document.createElement('div');
+            tableContainer.className = 'table-responsive';
+            tableContainer.style.maxHeight = '300px';
+            tableContainer.style.overflowY = 'auto';
+            
+            // 创建表格
+            const table = document.createElement('table');
+            table.id = 'uploadedFilesTable';
+            table.className = 'table table-hover mb-0';
+            
+            // 创建表头
+            table.innerHTML = `
+                <thead>
+                    <tr>
+                        <th width="5%">
+                            <input type="checkbox" id="uploadedFileSelectAll">
+                        </th>
+                        <th>文件名</th>
+                        <th>大小</th>
+                        <th>修改时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
             `;
-            uploadedContainer.appendChild(emptyDiv);
-            return;
+            
+            const tableBody = table.querySelector('tbody');
+            
+            // 添加新的文件行
+            files.forEach(file => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td><input type="checkbox" class="uploaded-file-checkbox" value="${file.name}"></td>
+                    <td>${file.name}</td>
+                    <td>${this.formatFileSize(file.size)}</td>
+                    <td>${file.modified}</td>
+                    <td>
+                        <div class="btn-group btn-group-sm" role="group">
+                            <button class="btn btn-outline-primary play-btn" data-filename="${file.name}">
+                                <i class="fas fa-play"></i> 
+                            </button>
+                            <a href="/download/upload/${file.name}" class="btn btn-outline-success">
+                                <i class="fas fa-download"></i>
+                            </a>
+                            <button class="btn btn-outline-danger" onclick="deleteUploadedFile('${file.name}')">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </td>
+                `;
+                tableBody.appendChild(row);
+            });
+            
+            tableContainer.appendChild(table);
+            uploadedContainer.appendChild(tableContainer);
+            
+            statusLogger.system(`成功更新上传文件列表，共 ${files.length} 个文件`);
+            
+            // 重新绑定全选复选框事件 - 增加安全检查
+            setTimeout(() => {
+                try {
+                    const newSelectAllCheckbox = document.getElementById('uploadedFileSelectAll');
+                    if (newSelectAllCheckbox) {
+                        newSelectAllCheckbox.addEventListener('change', () => {
+                            this.toggleSelectAll('uploaded');
+                        });
+                    }
+                } catch (e) {
+                    statusLogger.error('重新绑定全选复选框事件时发生错误', { error: e.message });
+                }
+            }, 0);
+        } catch (error) {
+            statusLogger.error('更新上传文件列表时发生错误', { error: error.message });
         }
-        
-        // 创建表格容器
-        const tableContainer = document.createElement('div');
-        tableContainer.className = 'table-responsive';
-        tableContainer.style.maxHeight = '300px';
-        tableContainer.style.overflowY = 'auto';
-        
-        // 创建表格
-        const table = document.createElement('table');
-        table.id = 'uploadedFilesTable';
-        table.className = 'table table-hover mb-0';
-        
-        // 创建表头
-        table.innerHTML = `
-            <thead>
-                <tr>
-                    <th width="5%">
-                        <input type="checkbox" id="uploadedFileSelectAll">
-                    </th>
-                    <th>文件名</th>
-                    <th>大小</th>
-                    <th>修改时间</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody></tbody>
-        `;
-        
-        const tableBody = table.querySelector('tbody');
-        
-        // 添加新的文件行
-        files.forEach(file => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td><input type="checkbox" class="uploaded-file-checkbox" value="${file.name}"></td>
-                <td>${file.name}</td>
-                <td>${this.formatFileSize(file.size)}</td>
-                <td>${file.modified}</td>
-                <td>
-                    <div class="btn-group btn-group-sm" role="group">
-                        <button class="btn btn-outline-primary play-btn" data-filename="${file.name}" onclick="playAudio('${file.name}')">
-                            <i class="fas fa-play"></i> 播放
-                        </button>
-                        <a href="/download/upload/${file.name}" class="btn btn-outline-success">
-                            <i class="fas fa-download"></i>
-                        </a>
-                        <button class="btn btn-outline-danger" onclick="deleteUploadedFile('${file.name}')">
-                            <i class="fas fa-trash"></i>
-                        </button>
-                    </div>
-                </td>
-            `;
-            tableBody.appendChild(row);
-        });
-        
-        tableContainer.appendChild(table);
-        uploadedContainer.appendChild(tableContainer);
-        
-        // 重新绑定全选复选框事件
-         const newSelectAllCheckbox = document.getElementById('uploadedFileSelectAll');
-         if (newSelectAllCheckbox) {
-             newSelectAllCheckbox.addEventListener('change', () => {
-                 this.toggleSelectAll('uploaded');
-             });
-         }
     }
 
     /**
      * 更新输出文件列表
      */
     updateOutputFileList(files) {
-        // 查找输出文件表格的容器
-        const outputContainer = document.querySelector('.col-md-6:last-child .card-body');
-        if (!outputContainer) return;
-        
-        // 保留操作按钮区域
-        const operationButtons = outputContainer.querySelector('.d-flex.justify-content-between');
-        
-        // 清空除操作按钮外的内容
-        outputContainer.innerHTML = '';
-        if (operationButtons) {
-            outputContainer.appendChild(operationButtons);
-        }
-        
-        if (files.length === 0) {
-            const emptyDiv = document.createElement('div');
-            emptyDiv.className = 'text-center py-4';
-            emptyDiv.innerHTML = `
-                <i class="fas fa-inbox fa-2x text-muted mb-2"></i>
-                <p class="text-muted">暂无转录结果</p>
+        try {
+            // 查找输出文件表格的容器
+            const outputContainer = document.querySelector('.col-md-6:last-child .card-body');
+            if (!outputContainer) {
+                statusLogger.error('未能找到输出文件容器');
+                return;
+            }
+            
+            statusLogger.system('找到输出文件容器，开始更新内容');
+            
+            // 保留操作按钮区域
+            const operationButtons = outputContainer.querySelector('.d-flex.justify-content-between');
+            
+            // 清空除操作按钮外的内容
+            outputContainer.innerHTML = '';
+            if (operationButtons) {
+                outputContainer.appendChild(operationButtons);
+            }
+            
+            if (files.length === 0) {
+                const emptyDiv = document.createElement('div');
+                emptyDiv.className = 'text-center py-4';
+                emptyDiv.innerHTML = `
+                    <i class="fas fa-inbox fa-2x text-muted mb-2"></i>
+                    <p class="text-muted">暂无转录结果</p>
+                `;
+                outputContainer.appendChild(emptyDiv);
+                statusLogger.system('输出文件列表为空');
+                return;
+            }
+            
+            // 创建表格容器
+            const tableContainer = document.createElement('div');
+            tableContainer.className = 'table-responsive';
+            tableContainer.style.maxHeight = '300px';
+            tableContainer.style.overflowY = 'auto';
+            
+            // 创建表格
+            const table = document.createElement('table');
+            table.id = 'outputFilesTable';
+            table.className = 'table table-hover mb-0';
+            
+            // 创建表头
+            table.innerHTML = `
+                <thead>
+                    <tr>
+                        <th width="5%">
+                            <input type="checkbox" id="outputFileSelectAll">
+                        </th>
+                        <th>文件名</th>
+                        <th>大小</th>
+                        <th>修改时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
             `;
-            outputContainer.appendChild(emptyDiv);
-            return;
+            
+            const tableBody = table.querySelector('tbody');
+            
+            // 添加新的文件行
+            files.forEach(file => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td><input type="checkbox" class="output-file-checkbox" value="${file.name}"></td>
+                    <td>${file.name}</td>
+                    <td>${this.formatFileSize(file.size)}</td>
+                    <td>${file.modified}</td>
+                    <td>
+                        <div class="btn-group btn-group-sm" role="group">
+                            <a href="/download/output/${file.name}" class="btn btn-outline-success">
+                                <i class="fas fa-download"></i>
+                            </a>
+                            <button class="btn btn-outline-danger" onclick="deleteOutputFile('${file.name}')">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </td>
+                `;
+                tableBody.appendChild(row);
+            });
+            
+            tableContainer.appendChild(table);
+            outputContainer.appendChild(tableContainer);
+            
+            statusLogger.system(`成功更新输出文件列表，共 ${files.length} 个文件`);
+            console.log(`[FileManager] 成功更新输出文件列表，共 ${files.length} 个文件`);
+            
+            // 重新绑定全选复选框事件 - 增加安全检查
+            setTimeout(() => {
+                try {
+                    const newSelectAllCheckbox = document.getElementById('outputFileSelectAll');
+                    if (newSelectAllCheckbox) {
+                        newSelectAllCheckbox.addEventListener('change', () => {
+                            this.toggleSelectAll('output');
+                        });
+                    }
+                } catch (e) {
+                    statusLogger.error('重新绑定全选复选框事件时发生错误', { error: e.message });
+                }
+            }, 0);
+        } catch (error) {
+            statusLogger.error('更新输出文件列表时发生错误', { error: error.message });
         }
-        
-        // 创建表格容器
-        const tableContainer = document.createElement('div');
-        tableContainer.className = 'table-responsive';
-        tableContainer.style.maxHeight = '300px';
-        tableContainer.style.overflowY = 'auto';
-        
-        // 创建表格
-        const table = document.createElement('table');
-        table.id = 'outputFilesTable';
-        table.className = 'table table-hover mb-0';
-        
-        // 创建表头
-        table.innerHTML = `
-            <thead>
-                <tr>
-                    <th width="5%">
-                        <input type="checkbox" id="outputFileSelectAll">
-                    </th>
-                    <th>文件名</th>
-                    <th>大小</th>
-                    <th>修改时间</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody></tbody>
-        `;
-        
-        const tableBody = table.querySelector('tbody');
-        
-        // 添加新的文件行
-        files.forEach(file => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td><input type="checkbox" class="output-file-checkbox" value="${file.name}"></td>
-                <td>${file.name}</td>
-                <td>${this.formatFileSize(file.size)}</td>
-                <td>${file.modified}</td>
-                <td>
-                    <div class="btn-group btn-group-sm" role="group">
-                        <a href="/download/output/${file.name}" class="btn btn-outline-success">
-                            <i class="fas fa-download"></i>
-                        </a>
-                        <button class="btn btn-outline-danger" onclick="deleteOutputFile('${file.name}')">
-                            <i class="fas fa-trash"></i>
-                        </button>
-                    </div>
-                </td>
-            `;
-            tableBody.appendChild(row);
-        });
-        
-        tableContainer.appendChild(table);
-        outputContainer.appendChild(tableContainer);
     }
 
     /**
@@ -578,26 +730,7 @@ const fileManager = new FileManager();
 // 将fileManager设置为全局变量，以便其他模块访问
 window.fileManager = fileManager;
 
-// 全局函数用于处理拖拽事件
-function preventDefaults(e) {
-    e.preventDefault();
-    e.stopPropagation();
-}
-
-function handleDrop(e) {
-    const dt = e.dataTransfer;
-    const files = dt.files;
-    fileManager.handleFiles(files);
-}
-
-function handleFileSelect(e) {
-    const files = e.target.files;
-    fileManager.handleFiles(files);
-}
-
-function handleFiles(files) {
-    fileManager.handleFiles(files);
-}
+// 这些函数已移动到templates/index.html中，避免重复定义
 
 // 全局函数用于删除上传的文件
 async function deleteUploadedFile(filename) {
@@ -606,28 +739,42 @@ async function deleteUploadedFile(filename) {
     }
     
     try {
+        statusLogger.system('开始删除上传文件', { filename });
+        
         const response = await fetch(`/delete_uploaded/${encodeURIComponent(filename)}`, {
             method: 'DELETE'
         });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
         
         const result = await response.json();
         
         if (result.success) {
             statusLogger.success('上传文件已删除', { filename });
             showNotification('文件已删除', 'success');
+            
             // 从选中文件集合中移除已删除的文件
-            fileManager.selectedFiles.delete(filename);
+            if (fileManager && fileManager.selectedFiles) {
+                fileManager.selectedFiles.delete(filename);
+            }
+            
             // 重新加载文件列表 - 使用刷新方法
-            await fileManager.refreshFileList('uploaded');
-            // 更新全选按钮状态
-            fileManager.updateSelectAllButton();
+            if (fileManager) {
+                await fileManager.refreshFileList('uploaded');
+                // 更新全选按钮状态
+                fileManager.updateSelectAllButton();
+            }
+            
+            statusLogger.system('上传文件删除完成', { filename });
         } else {
             statusLogger.error('文件删除失败', { filename, error: result.error });
             showNotification(`删除失败: ${result.error}`, 'danger');
         }
     } catch (error) {
-        statusLogger.error('删除文件时发生错误', { error: error.message });
-        showNotification('删除文件时发生错误', 'danger');
+        statusLogger.error('删除文件时发生错误', { filename, error: error.message });
+        showNotification('删除文件时发生错误，请重试', 'danger');
     }
 }
 
@@ -638,24 +785,35 @@ async function deleteOutputFile(filename) {
     }
     
     try {
+        statusLogger.system('开始删除输出文件', { filename });
+        
         const response = await fetch(`/delete_output/${encodeURIComponent(filename)}`, {
             method: 'DELETE'
         });
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
         
         const result = await response.json();
         
         if (result.success) {
             statusLogger.success('输出文件已删除', { filename });
             showNotification('文件已删除', 'success');
+            
             // 重新加载文件列表 - 使用刷新方法
-            await fileManager.refreshFileList('output');
+            if (fileManager) {
+                await fileManager.refreshFileList('output');
+            }
+            
+            statusLogger.system('输出文件删除完成', { filename });
         } else {
             statusLogger.error('输出文件删除失败', { filename, error: result.error });
             showNotification(`删除失败: ${result.error}`, 'danger');
         }
     } catch (error) {
-        statusLogger.error('删除输出文件时发生错误', { error: error.message });
-        showNotification('删除输出文件时发生错误', 'danger');
+        statusLogger.error('删除输出文件时发生错误', { filename, error: error.message });
+        showNotification('删除输出文件时发生错误，请重试', 'danger');
     }
 }
 

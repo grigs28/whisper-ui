@@ -36,6 +36,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import config
 from utils.logger import logger
 from utils.logger import WebSocketHandler
+from core.optimized_whisper import get_optimized_system, OptimizedWhisperSystem
+from core.file_manager import FileManager
+from core.gpu_manager import EnhancedGPUManager as GPUManager
 
 # 重定向stdout以添加时间戳到所有输出
 class TimestampedStdout:
@@ -62,53 +65,7 @@ class TimestampedStdout:
     def flush(self):
         self.original_stdout.flush()
 
-class ProgressCapture:
-    """捕获tqdm进度条输出并通过WebSocket发送"""
-    def __init__(self, task_id=None, model_name=None):
-        self.task_id = task_id
-        self.model_name = model_name
-        self.buffer = ""
-        self.download_started = False
-        
-    def write(self, text):
-        if text.strip():
-            # 检查是否是tqdm进度条输出
-            if '%' in text and ('|' in text or 'MB' in text or 'B/s' in text):
-                # 如果是第一次检测到下载，发送开始信号
-                if not self.download_started and self.task_id:
-                    self.download_started = True
-                    socketio.emit('download_progress', {
-                        'task_id': self.task_id,
-                        'progress': 0,
-                        'message': '开始下载模型...',
-                        'model_name': self.model_name,
-                        'status': 'started'
-                    })
-                    logger.info(f"开始下载模型: {self.model_name}")
-                
-                # 提取进度信息
-                try:
-                    # 查找百分比
-                    import re
-                    percent_match = re.search(r'(\d+)%', text)
-                    if percent_match:
-                        percent = int(percent_match.group(1))
-                        # 通过WebSocket发送进度更新
-                        if self.task_id:
-                            socketio.emit('download_progress', {
-                                'task_id': self.task_id,
-                                'progress': percent,
-                                'message': f'模型下载进度: {percent}%',
-                                'model_name': self.model_name,
-                                'status': 'downloading'
-                            })
-                        logger.info(f"模型下载进度: {percent}%")
-                except:
-                    pass
-        return len(text)
-    
-    def flush(self):
-        pass
+# ProgressCapture类已移动到core/transcription.py
 
 # 初始化Flask应用
 app = Flask(__name__)
@@ -117,41 +74,38 @@ app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = config.MAX_CONTENT_LENGTH
 
 # 初始化SocketIO
-socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True)
+socketio = SocketIO(app, cors_allowed_origins="*", logger=False, engineio_logger=False)
 
 # 确保必要的目录存在
 os.makedirs(config.UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(config.OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(os.path.dirname(config.LOG_FILE), exist_ok=True)
 
-# 支持的语言列表（10种常用语言）
-SUPPORTED_LANGUAGES = [
-    ('zh', '中文'),
-    ('en', '英语'),
-    ('ja', '日语'),
-    ('ko', '韩语'),
-    ('fr', '法语'),
-    ('de', '德语'),
-    ('es', '西班牙语'),
-    ('ru', '俄语'),
-    ('ar', '阿拉伯语'),
-    ('pt', '葡萄牙语')
-]
-
-# 支持的Whisper模型
-WHISPER_MODELS = ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3', 'turbo']
+# 常量已移动到相应的模块中
+from config import SUPPORTED_LANGUAGES, WHISPER_MODELS, WHISPER_MODEL_MEMORY_REQUIREMENTS
 
 # GPU信息缓存
 gpu_info_cache = {}
 last_gpu_info_time = 0
 GPU_INFO_CACHE_DURATION = 30  # 缓存30秒
 
-# 任务队列
-task_queue = []
-task_lock = threading.Lock()
+# 显存安全边际（从配置文件读取）
+MEMORY_SAFETY_MARGIN = config.MEMORY_SAFETY_MARGIN
 
-# 当前运行的任务
-running_tasks = {}
+# 优化系统实例
+optimized_whisper_system = None
+
+# 任务管理器和处理器实例
+task_manager = None
+task_processor = None
+transcription_processor = None
+gpu_manager = None
+file_manager = None
+
+
+# start_pending_tasks函数已移动到TaskProcessor类中
+            
+
 
 def parse_version_md():
     """解析 Markdown 版本文件"""
@@ -209,341 +163,26 @@ def parse_version_md():
         logger.error(f"解析版本文件失败: {str(e)}")
         return None
 
-def get_gpu_info():
-    """获取GPU信息"""
-    global gpu_info_cache, last_gpu_info_time
-    
-    # 检查缓存
-    current_time = time.time()
-    if current_time - last_gpu_info_time < GPU_INFO_CACHE_DURATION:
-        return gpu_info_cache
-    
-    gpu_info = {
-        'success': False,
-        'error': '未检测到GPU',
-        'memory': None,
-        'temperature': None,
-        'gpus': [],
-        'best_gpu': None
-    }
-    
-    try:
-        if torch.cuda.is_available():
-            device_count = torch.cuda.device_count()
-            if device_count > 0:
-                gpus = []
-                best_gpu_id = 0
-                max_free_memory = 0
-                
-                # 获取所有GPU的信息
-                for i in range(device_count):
-                    gpu_name = torch.cuda.get_device_name(i)
-                    memory_info = torch.cuda.mem_get_info(i)
-                    memory_total = memory_info[1]  # 总内存
-                    memory_free = memory_info[0]   # 空闲内存
-                    memory_used = memory_total - memory_free  # 已使用内存
-                    
-                    gpu_data = {
-                        'id': i,
-                        'name': gpu_name,
-                        'memory': {
-                            'total': memory_total,
-                            'used': memory_used,
-                            'free': memory_free
-                        }
-                    }
-                    gpus.append(gpu_data)
-                    
-                    # 找到空闲内存最多的GPU
-                    if memory_free > max_free_memory:
-                        max_free_memory = memory_free
-                        best_gpu_id = i
-                
-                # 获取主GPU（第一个）的信息用于兼容性
-                main_gpu = gpus[0]
-                
-                # 获取温度（如果可用）
-                temperature = None
-                try:
-                    # 注意：PyTorch本身不提供温度信息，这里模拟
-                    # 实际应用中可能需要使用nvidia-smi等工具
-                    temperature = 65  # 模拟温度
-                except:
-                    pass
-                
-                gpu_info = {
-                    'success': True,
-                    'device_count': device_count,
-                    'device_name': main_gpu['name'],
-                    'memory': main_gpu['memory'],
-                    'temperature': temperature,
-                    'gpus': gpus,
-                    'best_gpu': best_gpu_id
-                }
-        else:
-            gpu_info['error'] = 'CUDA不可用'
-            
-    except Exception as e:
-        logger.error(f"获取GPU信息时出错: {str(e)}")
-        gpu_info['error'] = str(e)
-    
-    # 更新缓存
-    gpu_info_cache = gpu_info
-    last_gpu_info_time = current_time
-    
-    return gpu_info
-
-def get_available_gpus():
-    """获取可用的GPU列表，包含详细信息"""
-    gpus = []
-    try:
-        if torch.cuda.is_available():
-            device_count = torch.cuda.device_count()
-            for i in range(device_count):
-                gpu_name = torch.cuda.get_device_name(i)
-                memory_info = torch.cuda.mem_get_info(i)
-                memory_total = memory_info[1]
-                memory_free = memory_info[0]
-                
-                gpus.append({
-                    'id': i,
-                    'name': gpu_name,
-                    'memory_total': memory_total,
-                    'memory_free': memory_free,
-                    'memory_used': memory_total - memory_free
-                })
-    except Exception as e:
-        logger.error(f"获取GPU列表失败: {str(e)}")
-    
-    return gpus
-
-def get_uploaded_files():
-    """获取上传的文件列表"""
-    files = []
-    if os.path.exists(config.UPLOAD_FOLDER):
-        for filename in os.listdir(config.UPLOAD_FOLDER):
-            # 排除以.开头的隐藏文件
-            if filename.startswith('.'):
-                continue
-            filepath = os.path.join(config.UPLOAD_FOLDER, filename)
-            if os.path.isfile(filepath):
-                stat = os.stat(filepath)
-                files.append({
-                    'name': filename,
-                    'size': stat.st_size,
-                    'modified': datetime.fromtimestamp(stat.st_mtime)
-                })
-    return sorted(files, key=lambda f: f['modified'], reverse=True)
-
-def get_output_files():
-    """获取输出的文件列表"""
-    files = []
-    if os.path.exists(config.OUTPUT_FOLDER):
-        for filename in os.listdir(config.OUTPUT_FOLDER):
-            # 排除以.开头的隐藏文件
-            if filename.startswith('.'):
-                continue
-            filepath = os.path.join(config.OUTPUT_FOLDER, filename)
-            if os.path.isfile(filepath):
-                stat = os.stat(filepath)
-                files.append({
-                    'name': filename,
-                    'size': stat.st_size,
-                    'modified': datetime.fromtimestamp(stat.st_mtime)
-                })
-    return sorted(files, key=lambda f: f['modified'], reverse=True)
-
-def cleanup_old_files():
-    """清理超过30天的文件"""
-    cutoff_date = datetime.now() - timedelta(days=30)
-    
-    # 清理上传文件夹
-    if os.path.exists(config.UPLOAD_FOLDER):
-        for filename in os.listdir(config.UPLOAD_FOLDER):
-            filepath = os.path.join(config.UPLOAD_FOLDER, filename)
-            if os.path.isfile(filepath):
-                stat = os.stat(filepath)
-                modified_date = datetime.fromtimestamp(stat.st_mtime)
-                if modified_date < cutoff_date:
-                    try:
-                        os.remove(filepath)
-                        logger.info(f"已清理过期文件: {filename}")
-                    except Exception as e:
-                        logger.error(f"清理文件失败 {filename}: {str(e)}")
-    
-    # 清理输出文件夹
-    if os.path.exists(config.OUTPUT_FOLDER):
-        for filename in os.listdir(config.OUTPUT_FOLDER):
-            filepath = os.path.join(config.OUTPUT_FOLDER, filename)
-            if os.path.isfile(filepath):
-                stat = os.stat(filepath)
-                modified_date = datetime.fromtimestamp(stat.st_mtime)
-                if modified_date < cutoff_date:
-                    try:
-                        os.remove(filepath)
-                        logger.info(f"已清理过期输出文件: {filename}")
-                    except Exception as e:
-                        logger.error(f"清理输出文件失败 {filename}: {str(e)}")
-
-def transcribe_audio(file_path, model_name, language, gpu_ids, task_id=None, output_format='json'):
-    """执行音频转录"""
-    try:
-        # 构建设备字符串
-        if gpu_ids and len(gpu_ids) > 0:
-            device = f"cuda:{gpu_ids[0]}"
-        else:
-            device = "cpu"
-        
-        # 加载模型
-        logger.info(f"加载模型 {model_name} 到 {device}")
-        
-        # 创建进度捕获器
-        progress_capture = ProgressCapture(task_id, model_name)
-        
-        # 设置模型下载路径
-        model_path = config.get_model_path(model_name)
-        os.environ['WHISPER_CACHE_DIR'] = config.MODEL_BASE_PATH
-        
-        # 在GPU环境下使用FP16精度，CPU环境下使用FP32
-        if device.startswith('cuda'):
-            # 使用torch.autocast来实现FP16推理，而不是直接转换模型
-            with redirect_stderr(progress_capture):
-                model = whisper.load_model(model_name, device=device, download_root=model_path)
-            logger.info(f"GPU环境下将使用FP16自动混合精度")
-        else:
-            with redirect_stderr(progress_capture):
-                model = whisper.load_model(model_name, device=device, download_root=model_path)
-            logger.info(f"CPU环境下使用FP32精度")
-        
-        logger.info(f"模型已从 {model_path} 加载")
-        
-        # 处理语言参数
-        transcribe_language = None
-        if language == 'auto':
-            # 自动检测时，不传递language参数，让whisper自动检测
-            transcribe_language = None
-            logger.info(f"使用自动语言检测转录文件: {file_path}")
-        else:
-            # 指定语言时，传递language参数
-            transcribe_language = language
-            logger.info(f"使用指定语言 {language} 转录文件: {file_path}")
-        
-        # 执行转录
-        if device.startswith('cuda'):
-            # 在GPU环境下使用FP16自动混合精度
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                if transcribe_language:
-                    # 对于中文，明确指定使用简体中文
-                    if transcribe_language == 'zh':
-                        result = model.transcribe(file_path, language='zh-CN', initial_prompt="以下是普通话句子。", task='transcribe')
-                    else:
-                        result = model.transcribe(file_path, language=transcribe_language)
-                else:
-                    result = model.transcribe(file_path)
-        else:
-            # CPU环境下正常执行
-            if transcribe_language:
-                # 对于中文，明确指定使用简体中文
-                if transcribe_language == 'zh':
-                    result = model.transcribe(file_path, language='zh-CN', initial_prompt="以下是普通话句子。", task='transcribe')
-                else:
-                    result = model.transcribe(file_path, language=transcribe_language)
-            else:
-                result = model.transcribe(file_path)
-        
-        # 对于中文转录结果，进行繁体到简体的转换
-        if (transcribe_language == 'zh' or result.get('language') == 'zh') and result.get('text'):
-            try:
-                # 初始化OpenCC转换器（繁体到简体）
-                converter = opencc.OpenCC('t2s')  # Traditional to Simplified
-                # 转换主文本
-                result['text'] = converter.convert(result['text'])
-                # 转换分段文本
-                if 'segments' in result:
-                    for segment in result['segments']:
-                        if 'text' in segment:
-                            segment['text'] = converter.convert(segment['text'])
-                logger.info("已将繁体中文转换为简体中文")
-            except Exception as e:
-                logger.warning(f"繁体到简体转换失败: {str(e)}，保持原文本")
-        
-        # 保存结果
-        base_filename = Path(file_path).stem
-        
-        # 根据输出格式确定文件扩展名
-        if output_format == 'txt':
-            extension = '.txt'
-        elif output_format == 'js':
-            extension = '.js'
-        else:
-            extension = '.json'
-        
-        # 生成输出文件名，如果文件已存在则添加时间戳
-        output_filename = f"{base_filename}{extension}"
-        output_path = os.path.join(config.OUTPUT_FOLDER, output_filename)
-        
-        # 检查文件是否存在，如果存在则添加时间戳
-        if os.path.exists(output_path):
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_filename = f"{base_filename}_{timestamp}{extension}"
-            output_path = os.path.join(config.OUTPUT_FOLDER, output_filename)
-        
-        # 根据格式保存文件
-        if output_format == 'txt':
-            # 保存为纯文本格式
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(result['text'])
-        elif output_format == 'js':
-            # 保存为JavaScript格式
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(f"// 转录结果\n")
-                f.write(f"// 文件: {Path(file_path).name}\n")
-                f.write(f"// 模型: {model_name}\n")
-                f.write(f"// 语言: {result.get('language', 'unknown')}\n")
-                f.write(f"// 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                f.write(f"const transcriptionResult = {json.dumps(result, ensure_ascii=False, indent=2)};\n\n")
-                f.write(f"// 转录文本\n")
-                f.write(f"const transcriptionText = {json.dumps(result['text'], ensure_ascii=False)};\n")
-        else:
-            # 保存为JSON格式（默认）
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-        
-        detected_language = result.get('language', 'unknown')
-        logger.info(f"转录完成: {output_filename}, 检测到的语言: {detected_language}")
-        return {
-            'success': True,
-            'output_file': output_filename,
-            'result': result
-        }
-        
-    except Exception as e:
-        logger.error(f"转录失败 {file_path}: {str(e)}")
-        if task_id:
-            logger.transcription_failed("转录失败", task_id, str(e))
-        return {
-            'success': False,
-            'error': str(e)
-        }
-
 @app.route('/')
 def index():
     """主页路由"""
     # 获取GPU信息
-    gpus = get_available_gpus()
-    gpu_info = get_gpu_info()
+    gpu_info = gpu_manager.get_gpu_info() if gpu_manager else {'success': False, 'error': 'GPU管理器未初始化', 'gpus': []}
+    gpus = []
     
     # 确定默认GPU选择
     default_gpu_id = None
-    if gpus and gpu_info.get('success'):
+    if gpu_info.get('success') and gpu_info.get('gpus'):
+        # 使用完整的GPU信息列表
+        gpus = gpu_info['gpus']
         # 选择空闲内存最多的GPU
         best_gpu_id = gpu_info.get('best_gpu')
         if best_gpu_id is not None:
             default_gpu_id = best_gpu_id
     
     # 获取文件列表
-    uploaded_files = get_uploaded_files()
-    output_files = get_output_files()
+    uploaded_files = file_manager.get_uploaded_files() if file_manager else []
+    output_files = file_manager.get_output_files() if file_manager else []
     
     # 获取模型内存需求（根据指南计算的精确值）
     model_memory_requirements = {
@@ -682,31 +321,39 @@ def start_transcription():
         
         task_ids = []
         
-        # 为每个文件创建单独的任务
-        with task_lock:
+        # 使用优化系统提交任务
+        if optimized_whisper_system:
+            # 为每个文件创建单独的任务
             for filename in files:
                 task_id = str(uuid.uuid4())
-                task_queue.append({
-                    'id': task_id,
-                    'files': [filename],  # 每个任务只处理一个文件
-                    'filename': filename,  # 添加文件名字段便于显示
+                task_data = {
+                    'task_id': task_id,
+                    'files': [filename],
                     'model': model,
                     'language': language,
                     'gpus': gpus,
                     'output_format': output_format,
-                    'status': 'pending',
-                    'created_at': datetime.now().isoformat(),
-                    'progress': 0,
-                    'start_time': None,
-                    'end_time': None
-                })
+                    'user_id': 'web_user'  # 默认用户ID
+                }
+                
+                # 提交任务到优化系统
+                optimized_whisper_system.submit_task(task_data)
                 task_ids.append(task_id)
-        
-        # 为每个任务启动后台线程
-        for task_id in task_ids:
-            thread = threading.Thread(target=process_transcription_task, args=(task_id,))
-            thread.daemon = True
-            thread.start()
+                
+                # 通过WebSocket推送任务状态
+                socketio.emit('task_update', {
+                    'id': task_id,
+                    'status': 'pending',
+                    'progress': 0,
+                    'message': '等待处理...',
+                    'files': [filename],
+                    'filename': filename,
+                    'model': model,
+                    'language': language,
+                    'created_at': datetime.now().isoformat()
+                })
+        else:
+            return jsonify({'success': False, 'error': '优化系统未初始化'}), 500
         
         logger.info(f"转录任务已提交: {len(task_ids)}个文件")
         return jsonify({
@@ -719,161 +366,172 @@ def start_transcription():
         logger.error(f"启动转录任务失败: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-def process_transcription_task(task_id):
-    """处理转录任务"""
-    global task_queue, running_tasks
-    
-    try:
-        # 从队列中获取任务
-        task = None
-        with task_lock:
-            for i, t in enumerate(task_queue):
-                if t['id'] == task_id:
-                    task = t
-                    task['status'] = 'processing'
-                    task['progress'] = 0
-                    running_tasks[task_id] = task
-                    break
-        
-        if not task:
-            logger.error(f"任务不存在: {task_id}")
-            return
-        
-        # 记录转录任务开始
-        task['start_time'] = datetime.now().isoformat()
-        logger.transcription_started("转录任务开始处理", task_id)
-        logger.processing("转录任务正在处理中", task_id)
-        # 发送任务开始通知
-        socketio.emit('task_update', {
-            'id': task_id,
-            'status': 'processing',
-            'progress': 0,
-            'message': '开始处理...',
-            'files': task['files'],
-            'model': task['model'],
-            'language': task['language'],
-            'start_time': task['start_time']
-        })
-        # 处理每个文件
-        total_files = len(task['files'])
-        for i, filename in enumerate(task['files']):
-            try:
-                # 更新进度
-                progress = int(((i + 1) / total_files) * 100)
-                task['progress'] = progress
-                
-                # 发送进度更新
-                socketio.emit('task_update', {
-                    'id': task_id,
-                    'status': 'processing',
-                    'progress': progress,
-                    'message': f'处理文件 {i+1}/{total_files}: {filename}',
-                    'files': task['files']
-                })
-                
-                # 构建文件路径
-                filepath = os.path.join(config.UPLOAD_FOLDER, filename)
-                
-                # 执行转录
-                result = transcribe_audio(filepath, task['model'], task['language'], task['gpus'], task_id, task.get('output_format', 'json'))
-                
-                if not result['success']:
-                    task['status'] = 'failed'
-                    task['error'] = result['error']
-                    socketio.emit('task_update', {
-                        'id': task_id,
-                        'status': 'failed',
-                        'progress': progress,
-                        'message': f'转录失败: {result["error"]}',
-                        'files': task['files']
-                    })
-                    return
-                    
-            except Exception as e:
-                logger.error(f"处理文件失败 {filename}: {str(e)}")
-                task['status'] = 'failed'
-                task['error'] = str(e)
-                socketio.emit('task_update', {
-                    'id': task_id,
-                    'status': 'failed',
-                    'progress': progress,
-                    'message': f'处理文件失败: {str(e)}',
-                    'files': task['files']
-                })
-                return
-        
-        # 完成任务
-        task['status'] = 'completed'
-        task['progress'] = 100
-        task['end_time'] = datetime.now().isoformat()
-        socketio.emit('task_update', {
-            'id': task_id,
-            'status': 'completed',
-            'progress': 100,
-            'message': '转录完成',
-            'files': task['files'],
-            'model': task['model'],
-            'language': task['language'],
-            'start_time': task['start_time'],
-            'end_time': task['end_time']
-        })
-        
-        # 从运行任务中移除
-        with task_lock:
-            if task_id in running_tasks:
-                del running_tasks[task_id]
-            # 从任务队列中移除已完成的任务
-            for i, t in enumerate(task_queue):
-                if t['id'] == task_id:
-                    del task_queue[i]
-                    break
-        
-        logger.info(f"转录任务完成: {task_id}")
-        
-    except Exception as e:
-        logger.error(f"处理任务失败 {task_id}: {str(e)}")
-        task['status'] = 'failed'
-        task['error'] = str(e)
-        socketio.emit('task_update', {
-            'id': task_id,
-            'status': 'failed',
-            'progress': 0,
-            'message': f'任务处理失败: {str(e)}',
-            'files': task.get('files', []) if 'task' in locals() else []
-        })
+# process_transcription_task 函数已迁移至 TaskProcessor 类中
 
 @app.route('/gpu_info')
 def get_gpu_info_endpoint():
     """获取GPU信息接口"""
-    gpu_info = get_gpu_info()
-    return jsonify(gpu_info)
+    try:
+        # 使用优化系统的GPU管理器
+        if optimized_whisper_system:
+            system_status = optimized_whisper_system.get_system_status()
+            gpu_status = system_status.get('gpu_status', {})
+            # 转换为前端期望的格式
+            gpus = []
+            for gpu_id, status in gpu_status.items():
+                gpu_info = {
+                    'id': gpu_id,
+                    'name': status.get('name', f'GPU {gpu_id}'),
+                    'total_memory': status.get('total_memory', 0),
+                    'allocated_memory': status.get('allocated_memory', 0),
+                    'free_memory': status.get('free_memory', 0),
+                    'available_memory': status.get('available_memory', 0),
+                    'utilization': status.get('utilization', 0)
+                }
+                # 如果有温度信息也加上
+                if 'temperature' in status:
+                    gpu_info['temperature'] = status['temperature']
+                gpus.append(gpu_info)
+            
+            gpu_info = {
+                'success': True,
+                'gpus': gpus
+            }
+        else:
+            # 使用传统的GPU管理器
+            gpu_info = gpu_manager.get_gpu_info()
+        return jsonify(gpu_info)
+    except Exception as e:
+        logger.error(f"获取GPU信息失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/gpu_selector')
+def get_gpu_selector_endpoint():
+    """获取GPU选择器列表接口"""
+    try:
+        # 使用优化系统的GPU管理器
+        if optimized_whisper_system:
+            system_status = optimized_whisper_system.get_system_status()
+            gpu_list = system_status.get('gpu_selector', [])
+            best_gpu = system_status.get('best_gpu_id')
+        else:
+            # 使用传统的GPU管理器
+            gpu_list = gpu_manager.get_gpu_list_for_selector()
+            best_gpu = gpu_manager.get_best_available_gpu()
+        
+        # 确定默认选择
+        default_selection = 'cpu'  # 默认CPU
+        if best_gpu is not None:
+            default_selection = f'gpu_{best_gpu}'
+        
+        return jsonify({
+            'success': True,
+            'gpus': gpu_list,
+            'default_selection': default_selection,
+            'best_gpu_id': best_gpu
+        })
+    except Exception as e:
+        logger.error(f"获取GPU选择器信息时出错: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'gpus': [{
+                'id': 'cpu',
+                'name': 'CPU',
+                'type': 'cpu',
+                'memory_info': 'CPU处理'
+            }],
+            'default_selection': 'cpu',
+            'best_gpu_id': None
+        })
 
 @app.route('/queue_state')
 def get_queue_state():
     """获取队列状态"""
-    with task_lock:
-        # 合并排队任务和正在运行的任务
+    # 使用优化系统的队列管理
+    if optimized_whisper_system:
+        system_status = optimized_whisper_system.get_system_status()
+        # 获取任务信息需要从队列管理器获取
         all_tasks = []
-        
-        # 添加排队中的任务（pending状态）
-        for task in task_queue:
-            if task['status'] == 'pending':
-                all_tasks.append(task)
-        
-        # 添加正在处理的任务
-        for task_id, task in running_tasks.items():
-            all_tasks.append(task)
+        if hasattr(optimized_whisper_system, 'queue_manager'):
+            # 从队列管理器获取所有任务
+            queue_manager = optimized_whisper_system.queue_manager
+            # 获取所有等待中的任务
+            for model_name in queue_manager.queues:
+                for task in queue_manager.queues[model_name]:
+                    all_tasks.append(task.to_dict())
+            # 获取所有处理中的任务
+            for task in queue_manager.processing_tasks.values():
+                all_tasks.append(task.to_dict())
+        current_running_tasks = system_status.get('queue_stats', {}).get('total_processing', 0)
+    else:
+        all_tasks = []
+        current_running_tasks = 0
+    
+    return jsonify({
+        'success': True,
+        'items': all_tasks,
+        'max_concurrent_tasks': config.MAX_CONCURRENT_TRANSCRIPTIONS,
+        'current_running_tasks': current_running_tasks
+    })
+
+@app.route('/concurrent_settings', methods=['GET', 'POST'])
+def concurrent_settings():
+    """获取或设置并发设置"""
+    if request.method == 'GET':
+        # 获取当前运行任务数
+        current_running = 0
+        if optimized_whisper_system and hasattr(optimized_whisper_system, 'queue_manager'):
+            queue_stats = optimized_whisper_system.queue_manager.get_queue_stats()
+            current_running = queue_stats.get('total_processing', 0)
         
         return jsonify({
             'success': True,
-            'items': all_tasks
+            'max_concurrent_tasks': config.MAX_CONCURRENT_TRANSCRIPTIONS,
+            'current_running_tasks': current_running,
+            'min_concurrent_tasks': 1,
+            'max_limit': 20
         })
+    
+    elif request.method == 'POST':
+        try:
+            data = request.get_json()
+            max_tasks = data.get('max_concurrent_tasks')
+            
+            if max_tasks is None:
+                return jsonify({'success': False, 'error': '缺少max_concurrent_tasks参数'}), 400
+            
+            if not isinstance(max_tasks, int) or max_tasks < 1 or max_tasks > 20:
+                return jsonify({'success': False, 'error': '并发任务数必须在1-20之间'}), 400
+            
+            new_max = max_tasks
+            
+            # 获取当前运行任务数
+            current_running = 0
+            if optimized_whisper_system and hasattr(optimized_whisper_system, 'queue_manager'):
+                queue_stats = optimized_whisper_system.queue_manager.get_queue_stats()
+                current_running = queue_stats.get('total_processing', 0)
+            
+            # 如果增加了并发数，尝试启动等待中的任务
+            if new_max > current_running:
+                # 优化系统会自动调度任务，不需要手动启动
+                pass
+            
+            return jsonify({
+                'success': True,
+                'max_concurrent_tasks': new_max,
+                'current_running_tasks': current_running
+            })
+            
+        except Exception as e:
+            logger.error(f"设置并发任务数失败: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/readme')
 def get_readme():
     """获取README内容"""
     try:
-        readme_path = os.path.join('docs', 'DEVELOPMENT_PROMPT.md')
+        readme_path = 'README.md'
         if os.path.exists(readme_path):
             with open(readme_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -931,7 +589,7 @@ def get_version():
 def get_uploaded_files_api():
     """获取上传文件列表"""
     try:
-        files = get_uploaded_files()
+        files = file_manager.get_uploaded_files()
         return jsonify({
             'success': True,
             'files': files
@@ -946,7 +604,7 @@ def get_uploaded_files_api():
 def get_output_files_api():
     """获取输出文件列表"""
     try:
-        files = get_output_files()
+        files = file_manager.get_output_files()
         return jsonify({
             'success': True,
             'files': files
@@ -1006,12 +664,41 @@ def handle_disconnect():
     logger.system('客户端已断开连接')
 
 if __name__ == '__main__':
-    # 启动时清理旧文件
-    cleanup_old_files()
+    # 初始化GPU管理器
+    gpu_manager = GPUManager()
+    logger.system("GPU管理器初始化成功")
+    
+    # 初始化文件管理器
+    file_manager = FileManager()
+    logger.system("文件管理器初始化成功")
     
     # 确保模型目录存在
     config.ensure_model_directory()
     logger.system(f"模型存储路径: {config.MODEL_BASE_PATH}")
+    
+    # 初始化优化系统
+    try:
+        optimized_whisper_system = get_optimized_system(socketio)
+        optimized_whisper_system.start_system()
+        
+        # 验证系统启动状态
+        if optimized_whisper_system.running and optimized_whisper_system.batch_scheduler.running:
+            logger.system("优化系统初始化成功")
+            logger.system("调度器已启动并运行正常")
+        else:
+            logger.error("优化系统启动失败：系统或调度器未运行")
+            optimized_whisper_system = None
+            
+    except Exception as e:
+        logger.error(f"优化系统初始化失败: {str(e)}")
+        optimized_whisper_system = None
+    
+    # 检查优化系统状态
+    if optimized_whisper_system is None:
+        logger.error("优化系统初始化失败，程序无法继续运行")
+        sys.exit(1)
+    
+    # 移除了旧的task_processor依赖函数设置
     
     # 启动应用
     logger.system("启动Whisper音频转录系统")
@@ -1027,6 +714,8 @@ if __name__ == '__main__':
         socketio.run(app, host=config.HOST, port=config.PORT, debug=config.DEBUG)
     except KeyboardInterrupt:
         logger.system("接收到中断信号，正在优雅关闭...")
+        if optimized_whisper_system:
+            optimized_whisper_system.shutdown()
         print("\n程序已收到中断信号，正在关闭...")
     except Exception as e:
         logger.error(f"应用运行时发生错误: {str(e)}")

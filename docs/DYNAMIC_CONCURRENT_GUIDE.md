@@ -9,7 +9,7 @@
 ### 1. 智能并发计算
 - **自动显存检测**：实时检测所有可用 GPU 的显存状态
 - **精确需求计算**：基于模型类型、分段长度和精度计算单任务显存需求
-- **安全边际预留**：预留 20% 显存作为安全缓冲，避免显存溢出
+- **安全边际预留**：预留 10% 显存作为安全缓冲，避免显存溢出
 - **动态调整**：根据显存变化自动调整最大并发数
 
 ### 2. 智能 GPU 分配
@@ -75,9 +75,9 @@ print(f"活动任务: {system_status['active_tasks']}")
 
 ```python
 # 在 config.py 中配置
-SEGMENT_DURATION = 300  # 分段长度（秒）
+SEGMENT_DURATION = 30  # 分段长度（秒）
 DEFAULT_PRECISION = "float16"  # 默认精度
-MEMORY_SAFETY_MARGIN = 0.2  # 安全边际（20%）
+MEMORY_SAFETY_MARGIN = 0.1  # 安全边际（10%）
 ```
 
 ### 并发控制参数

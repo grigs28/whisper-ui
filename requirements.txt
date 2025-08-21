@@ -3,11 +3,16 @@
 # Web框架
 Flask==2.3.3
 Flask-SocketIO==5.3.6
+eventlet==0.40.2
 
 # 音频处理和AI
 torch>=2.1.0
 torchaudio>=2.1.0
 openai-whisper==20231117
+
+# GPU管理
+pynvml==12.0.0
+nvidia-ml-py==12.575.51
 
 # 工具
 Werkzeug==2.3.7

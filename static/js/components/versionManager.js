@@ -62,10 +62,10 @@ class VersionManager {
                 this.currentVersion = data.version;
                 this.updateVersionDisplay();
             } else {
-                console.error('获取版本信息失败:', data.error);
+                statusLogger.error('获取版本信息失败: ' + data.error);
             }
         } catch (error) {
-            console.error('加载版本信息时出错:', error);
+            statusLogger.error('加载版本信息时出错: ' + error.message);
         }
     }
 
@@ -81,11 +81,11 @@ class VersionManager {
                 this.versionHistory = data.history;
                 return data;
             } else {
-                console.error('获取版本历史失败:', data.error);
+                statusLogger.error('获取版本历史失败: ' + data.error);
                 return null;
             }
         } catch (error) {
-            console.error('加载版本历史时出错:', error);
+            statusLogger.error('加载版本历史时出错: ' + error.message);
             return null;
         }
     }

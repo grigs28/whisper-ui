@@ -71,6 +71,10 @@ class TranscriptionController {
                 fileManager.selectedFiles.clear();
                 // 更新UI
                 fileManager.updateSelectAllButton();
+                // 刷新任务队列显示
+                if (typeof queueManager !== 'undefined') {
+                    queueManager.loadQueueState();
+                }
             } else {
                 statusLogger.error('转录任务启动失败', result);
                 showNotification(`转录失败: ${result.error}`, 'danger');

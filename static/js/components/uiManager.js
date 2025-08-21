@@ -119,7 +119,7 @@ class UIManager {
                 }
             }
         } catch (error) {
-            console.warn('加载版本信息失败:', error);
+            statusLogger.warning('加载版本信息失败: ' + error.message);
         }
     }
 

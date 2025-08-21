@@ -19,6 +19,8 @@ ENV/
 .idea/
 *.swp
 *.swo
+.trae/
+.cursor/
 
 # OS
 .DS_Store

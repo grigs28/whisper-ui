@@ -200,7 +200,7 @@ def _calculate_max_concurrent_tasks(self):
         
         total_concurrent = 0
         for gpu_id, memory_info in gpu_info['gpus'].items():
-            available_memory = memory_info['free'] * 0.8  # 预留20%安全边际
+            available_memory = memory_info['free'] * 0.9  # 预留10%安全边际
             gpu_concurrent = max(1, int(available_memory / base_model_memory))
             total_concurrent += gpu_concurrent
             

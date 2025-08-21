@@ -42,7 +42,7 @@ class WebSocketManager {
                 timestamp: new Date().toISOString(),
                 host: window.location.host
             });
-            console.log('WebSocket connected');
+            // console.log('WebSocket connected'); // 已通过statusLogger.system记录
         });
 
         this.socket.on('disconnect', (reason) => {
@@ -52,7 +52,7 @@ class WebSocketManager {
                 timestamp: new Date().toISOString(),
                 host: window.location.host
             });
-            console.log('WebSocket disconnected:', reason);
+            // console.log('WebSocket disconnected:', reason); // 已通过statusLogger.warning记录
         });
 
         this.socket.on('connect_error', (error) => {
@@ -61,7 +61,7 @@ class WebSocketManager {
                 timestamp: new Date().toISOString(),
                 host: window.location.host
             });
-            console.error('WebSocket connection error:', error);
+            // console.error('WebSocket connection error:', error); // 已通过statusLogger.error记录
         });
 
         this.socket.on('reconnect', (attemptNumber) => {
@@ -71,7 +71,7 @@ class WebSocketManager {
                 timestamp: new Date().toISOString(),
                 host: window.location.host
             });
-            console.log('WebSocket reconnected after', attemptNumber, 'attempts');
+            // console.log('WebSocket reconnected after', attemptNumber, 'attempts'); // 已通过statusLogger.success记录
         });
 
         this.socket.on('reconnect_attempt', (attemptNumber) => {
@@ -80,7 +80,7 @@ class WebSocketManager {
                 timestamp: new Date().toISOString(),
                 host: window.location.host
             });
-            console.log('WebSocket reconnect attempt', attemptNumber);
+            // console.log('WebSocket reconnect attempt', attemptNumber); // 已通过statusLogger.warning记录
         });
 
         this.socket.on('task_update', (data) => {
@@ -101,7 +101,11 @@ class WebSocketManager {
      */
     handleTaskUpdate(data) {
         // 更新任务状态
-        updateTaskStatus(data);
+        if (typeof updateTaskStatus === 'function') {
+            updateTaskStatus(data);
+        } else {
+            statusLogger.warning('updateTaskStatus函数未定义，无法更新任务状态', data);
+        }
         statusLogger.info('任务状态更新', data);
     }
 
@@ -169,6 +173,8 @@ class WebSocketManager {
         }
     }
     
+
+    
     /**
      * 处理日志消息
      */
@@ -226,6 +232,13 @@ class WebSocketManager {
             connected: this.isConnected,
             reconnectAttempts: this.reconnectAttempts
         };
+    }
+
+    /**
+     * 检查WebSocket连接状态
+     */
+    isConnected() {
+        return this.socket && this.socket.connected;
     }
 }
 

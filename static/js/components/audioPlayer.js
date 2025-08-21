@@ -58,7 +58,7 @@ class AudioPlayer {
             
             // 自动播放音频
             this.audioElement.play().catch(error => {
-                console.error('自动播放失败:', error);
+                statusLogger.error('自动播放失败: ' + error.message);
             });
         }
     }
@@ -155,6 +155,8 @@ class AudioPlayer {
             this.playerContainer.style.display = 'none';
         }
         this.stopAudio();
+        // 重置所有播放按钮的状态
+        this.resetAllPlayButtons();
     }
 
     /**
@@ -163,7 +165,18 @@ class AudioPlayer {
     onAudioEnded() {
         // 播放结束后可以做一些清理工作
         this.currentFile = null;
+        this.resetAllPlayButtons();
         this.hidePlayer();
+    }
+
+    /**
+     * 重置所有播放按钮的状态
+     */
+    resetAllPlayButtons() {
+        const playButtons = document.querySelectorAll('.play-btn');
+        playButtons.forEach(button => {
+            button.innerHTML = '<i class="fas fa-play"></i> ';
+        });
     }
 
     /**

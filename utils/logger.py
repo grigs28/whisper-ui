@@ -4,8 +4,12 @@
 
 import logging
 import os
-from logging.handlers import RotatingFileHandler
+import json
+import time
 from datetime import datetime
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
+from flask_socketio import SocketIO
+from typing import Dict, Any, Optional
 from config import config
 
 # 创建日志目录
@@ -19,19 +23,71 @@ logger.setLevel(getattr(logging, config.LOG_LEVEL))
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 
-# 创建文件处理器
-file_handler = RotatingFileHandler(
-    config.LOG_FILE, 
-    maxBytes=10*1024*1024,  # 10MB
-    backupCount=5
-)
-file_handler.setLevel(getattr(logging, config.LOG_LEVEL))
-
 # 创建格式器
 formatter = logging.Formatter(
     '%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+# 结构化日志格式器
+class StructuredFormatter(logging.Formatter):
+    """结构化日志格式器，支持JSON格式输出"""
+    def format(self, record):
+        log_entry = {
+            'timestamp': datetime.fromtimestamp(record.created).isoformat(),
+            'level': record.levelname,
+            'logger': record.name,
+            'message': record.getMessage(),
+            'module': record.module,
+            'function': record.funcName,
+            'line': record.lineno
+        }
+        
+        # 添加性能监控相关字段
+        if hasattr(record, 'performance_data'):
+            log_entry['performance'] = record.performance_data
+        
+        # 添加任务ID相关字段
+        if hasattr(record, 'task_id'):
+            log_entry['task_id'] = record.task_id
+        
+        # 添加用户ID相关字段
+        if hasattr(record, 'user_id'):
+            log_entry['user_id'] = record.user_id
+            
+        return json.dumps(log_entry, ensure_ascii=False)
+
+# 创建文件处理器 - 支持日志轮转
+file_handler = RotatingFileHandler(
+    config.LOG_FILE,
+    maxBytes=config.LOG_MAX_SIZE * 1024 * 1024,
+    backupCount=config.LOG_BACKUP_COUNT
+)
+file_handler.setLevel(getattr(logging, config.LOG_LEVEL))
+
+# 按时间轮转的文件处理器已禁用，只保留app.log
+
+# 创建结构化日志处理器（根据配置决定是否启用）
+structured_file_handler = None
+if config.ENABLE_STRUCTURED_LOGGING:
+    structured_file_handler = RotatingFileHandler(
+        config.LOG_FILE.replace('.log', '_structured.json'),
+        maxBytes=config.LOG_MAX_SIZE * 1024 * 1024,
+        backupCount=config.LOG_BACKUP_COUNT
+    )
+    structured_file_handler.setFormatter(StructuredFormatter())
+    structured_file_handler.setLevel(logging.INFO)
+
+# 创建性能监控日志处理器（根据配置决定是否启用）
+performance_file_handler = None
+if config.ENABLE_PERFORMANCE_MONITORING:
+    performance_file_handler = RotatingFileHandler(
+        config.PERFORMANCE_LOG_FILE,
+        maxBytes=config.LOG_MAX_SIZE * 1024 * 1024,
+        backupCount=config.LOG_BACKUP_COUNT
+    )
+    performance_file_handler.setFormatter(formatter)
+    performance_file_handler.setLevel(logging.INFO)
 
 # 添加格式器到处理器
 console_handler.setFormatter(formatter)
@@ -40,6 +96,14 @@ file_handler.setFormatter(formatter)
 # 添加处理器到logger
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
+
+# 根据配置添加结构化日志处理器
+if structured_file_handler:
+    logger.addHandler(structured_file_handler)
+
+# 根据配置添加性能监控日志处理器
+if performance_file_handler:
+    logger.addHandler(performance_file_handler)
 
 # 添加一个自定义方法用于系统消息
 def system_message(message):
@@ -147,6 +211,96 @@ def success(message, *args, **kwargs):
     """记录成功信息"""
     logger.info(f"[SUCCESS] {message}", *args, **kwargs)
 
+# 添加性能监控日志方法
+def performance_monitor(operation: str, duration: float, task_id: str = None, 
+                       user_id: str = None, **kwargs):
+    """记录性能监控信息"""
+    if not config.ENABLE_PERFORMANCE_MONITORING:
+        return
+        
+    performance_data = {
+        'operation': operation,
+        'duration_ms': round(duration * 1000, 2),
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    # 添加额外的性能指标
+    if kwargs:
+        performance_data.update(kwargs)
+    
+    # 创建自定义日志记录
+    log_record = logging.LogRecord(
+        name=logger.name,
+        level=logging.INFO,
+        pathname='',
+        lineno=0,
+        msg=f"[PERFORMANCE] {operation} took {duration:.3f}s",
+        args=(),
+        exc_info=None
+    )
+    
+    # 添加性能数据
+    log_record.performance_data = performance_data
+    if task_id:
+        log_record.task_id = task_id
+    if user_id:
+        log_record.user_id = user_id
+    
+    logger.handle(log_record)
+
+# 添加结构化日志方法
+def structured_log(level: str, message: str, **kwargs):
+    """记录结构化日志"""
+    if not config.ENABLE_STRUCTURED_LOGGING:
+        return
+        
+    level_map = {
+        'debug': logging.DEBUG,
+        'info': logging.INFO,
+        'warning': logging.WARNING,
+        'error': logging.ERROR,
+        'critical': logging.CRITICAL
+    }
+    
+    log_level = level_map.get(level.lower(), logging.INFO)
+    
+    # 创建自定义日志记录
+    log_record = logging.LogRecord(
+        name=logger.name,
+        level=log_level,
+        pathname='',
+        lineno=0,
+        msg=message,
+        args=(),
+        exc_info=None
+    )
+    
+    # 添加结构化数据
+    for key, value in kwargs.items():
+        setattr(log_record, key, value)
+    
+    logger.handle(log_record)
+
+# 性能监控装饰器
+def performance_monitor_decorator(operation_name: str = None):
+    """性能监控装饰器"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            start_time = time.time()
+            operation = operation_name or f"{func.__module__}.{func.__name__}"
+            
+            try:
+                result = func(*args, **kwargs)
+                duration = time.time() - start_time
+                performance_monitor(operation, duration)
+                return result
+            except Exception as e:
+                duration = time.time() - start_time
+                performance_monitor(operation, duration, error=str(e))
+                raise
+        return wrapper
+    return decorator
+
 # 为logger添加这些方法
 logger.system = system_message
 logger.user = user_action
@@ -162,11 +316,12 @@ logger.transcription_completed = transcription_completed
 logger.transcription_failed = transcription_failed
 logger.processing = processing
 logger.completed = completed
-logger.debug = debug
+logger.performance = performance_monitor
+logger.structured = structured_log
+logger.monitor = performance_monitor_decorator
 
-# 导出logger以便其他模块使用
-__all__ = ['logger']
-
+# 导出logger和相关函数以便其他模块使用
+__all__ = ['logger', 'performance_monitor', 'structured_log', 'performance_monitor_decorator']
 # 添加WebSocket日志处理器
 class WebSocketHandler(logging.Handler):
     """WebSocket日志处理器，用于将日志发送到前端"""
@@ -179,6 +334,30 @@ class WebSocketHandler(logging.Handler):
             # 解析日志消息，提取时间戳和级别信息
             message = record.getMessage()
             level = record.levelname.lower()
+            
+            # 检查特殊日志类型并映射到相应级别
+            if '[GPU_ALLOC]' in message:
+                level = 'gpu'
+            elif '[GPU_POOL]' in message:
+                level = 'gpu'
+            elif '[TRANSCRIPTION]' in message:
+                level = 'transcription'
+            elif '[FILE]' in message:
+                level = 'file'
+            elif '[CLIENT]' in message:
+                level = 'client'
+            elif '[SYSTEM]' in message:
+                level = 'system'
+            elif '[PROCESSING]' in message:
+                level = 'processing'
+            elif '[COMPLETED]' in message:
+                level = 'completed'
+            elif '[ERROR]' in message:
+                level = 'error'
+            elif '[WARNING]' in message:
+                level = 'warning'
+            elif '[SUCCESS]' in message:
+                level = 'success'
             
             # 根据日志级别设置颜色
             level_colors = {
@@ -199,10 +378,6 @@ class WebSocketHandler(logging.Handler):
             # 通过WebSocket发送日志到前端
             if self.socketio:
                 self.socketio.emit('log_message', log_entry)
-                
-            # 同时在终端输出带时间戳的消息
-            timestamp = datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S')
-            print(f"[{timestamp}] {message}")
         except Exception:
             # 避免日志处理错误导致程序崩溃
             pass

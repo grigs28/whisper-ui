@@ -1,0 +1,372 @@
+import os
+import torch
+import threading
+import logging
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass
+from config import config
+from utils.logger import logger
+
+
+class MemoryEstimationPool:
+    """显存预估池管理器"""
+    
+    def __init__(self, gpu_manager):
+        self.gpu_manager = gpu_manager
+        self.gpu_pools: Dict[int, 'GPUMemoryPool'] = {}  # {gpu_id: GPUMemoryPool}
+        self.calibration_data = {}  # 校准数据
+        self.segment_duration = int(os.getenv('SEGMENT_DURATION', 30))
+        self.confidence_factor = float(os.getenv('MEMORY_CONFIDENCE_FACTOR', 1.2))
+        self._sync_lock = threading.Lock()
+    
+    def initialize_gpu_pool(self, gpu_id: int):
+        """初始化GPU显存池"""
+        try:
+            # 获取GPU信息
+            gpu_info_result = self.gpu_manager.get_gpu_info()
+            
+            if not gpu_info_result.get('success'):
+                logger.error(f"无法获取GPU {gpu_id} 的信息")
+                return
+            
+            # 查找指定GPU的信息
+            target_gpu_info = None
+            for gpu_info in gpu_info_result['gpus']:
+                if gpu_info['id'] == gpu_id:
+                    target_gpu_info = gpu_info
+                    break
+            
+            if not target_gpu_info:
+                logger.error(f"未找到GPU {gpu_id} 的信息")
+                return
+            
+            total_memory = target_gpu_info['total_memory']
+            reserved_memory = target_gpu_info.get('reserved_memory', 1.0)
+            
+            # 导入GPUMemoryPool类
+            from core.gpu_manager import GPUMemoryPool
+            self.gpu_pools[gpu_id] = GPUMemoryPool(gpu_id, total_memory, reserved_memory)
+            
+            # 同步当前显存使用情况
+            allocated_memory = target_gpu_info.get('allocated_memory', 0)
+            self.gpu_pools[gpu_id].allocated_memory = allocated_memory
+            
+            available_memory = target_gpu_info.get('available_memory', 0)
+            logger.info(f"初始化GPU{gpu_id}显存池: 总计{total_memory:.2f}GB, 已分配: {allocated_memory:.2f}GB, 可用: {available_memory:.2f}GB")
+        except Exception as e:
+            logger.error(f"初始化GPU {gpu_id} 显存池失败: {e}", exc_info=True)
+    
+    def sync_gpu_status(self):
+        """同步GPU状态"""
+        try:
+            gpu_info = self.gpu_manager.get_gpu_info()
+            
+            if gpu_info.get('success') and gpu_info.get('gpus'):
+                for gpu in gpu_info['gpus']:
+                    gpu_id = gpu['id']
+                    allocated_memory = gpu['allocated_memory']
+                    
+                    # 更新显存池中的分配状态
+                    if gpu_id in self.gpu_pools:
+                        self.gpu_pools[gpu_id].allocated_memory = allocated_memory
+                        
+        except Exception as e:
+            logger.error(f"同步GPU状态失败: {e}", exc_info=True)
+    
+    def calibrate_model_memory(self, gpu_id: int, model_name: str, actual_usage: float):
+        """校准模型显存使用量"""
+        try:
+            key = f"{gpu_id}_{model_name}"
+            
+            if key not in self.calibration_data:
+                self.calibration_data[key] = {
+                    'samples': [],
+                    'avg_usage': 0,
+                    'std_deviation': 0
+                }
+                
+            # 添加新的校准样本
+            self.calibration_data[key]['samples'].append(actual_usage)
+            
+            # 保持最近50个样本
+            sample_size = int(os.getenv('CALIBRATION_SAMPLE_SIZE', 50))
+            if len(self.calibration_data[key]['samples']) > sample_size:
+                self.calibration_data[key]['samples'].pop(0)
+                
+            # 重新计算平均值和标准差
+            samples = self.calibration_data[key]['samples']
+            avg_usage = sum(samples) / len(samples)
+            std_dev = (sum((x - avg_usage) ** 2 for x in samples) / len(samples)) ** 0.5
+            
+            self.calibration_data[key]['avg_usage'] = avg_usage
+            self.calibration_data[key]['std_deviation'] = std_dev
+            
+            # 更新GPU池中的预估值
+            estimated_usage = avg_usage + std_dev * self.confidence_factor
+            if gpu_id in self.gpu_pools:
+                self.gpu_pools[gpu_id].update_model_estimation(model_name, estimated_usage)
+            
+            logger.info(f"模型{model_name}在GPU{gpu_id}的显存使用校准: "
+                       f"平均{avg_usage:.2f}GB, 预估{estimated_usage:.2f}GB")
+        except Exception as e:
+            logger.error(f"校准模型 {model_name} 在GPU {gpu_id} 的显存使用量失败: {e}", exc_info=True)
+                   
+    def get_estimated_memory_usage(self, gpu_id: int, model_name: str) -> float:
+        """获取模型预估显存使用量"""
+        try:
+            if gpu_id in self.gpu_pools:
+                return self.gpu_pools[gpu_id].get_model_estimation(model_name)
+            logger.debug(f"GPU {gpu_id} 未初始化显存池，使用默认估计")
+            return self._get_default_estimation(model_name)
+        except Exception as e:
+            logger.error(f"获取GPU {gpu_id} 模型 {model_name} 预估显存失败: {e}", exc_info=True)
+            return self._get_default_estimation(model_name)
+        
+    def can_allocate_tasks(self, gpu_id: int, tasks: List[Dict[str, Any]]) -> bool:
+        """检查GPU是否可以分配指定任务"""
+        try:
+            if gpu_id not in self.gpu_pools:
+                logger.warning(f"[MEM_CHECK] GPU{gpu_id} 不存在于显存池中")
+                return False
+                
+            total_required = 0
+            for task in tasks:
+                model_name = task.get('model', task.get('model_name', 'medium'))
+                model_memory = self.get_estimated_memory_usage(gpu_id, model_name)
+                # 考虑音频时长对显存的影响
+                duration_factor = self._calculate_duration_factor(task)
+                task_memory = model_memory * duration_factor
+                total_required += task_memory
+                logger.info(f"[MEM_CHECK] 任务 {task.get('task_id', 'unknown')} 模型 {model_name} 需要显存: {task_memory:.2f}GB")
+                
+            # 首先检查全局显存是否足够
+            gpu_status = self.get_gpu_status()
+            if gpu_id not in gpu_status:
+                logger.error(f"[MEM_CHECK] 无法获取GPU{gpu_id}状态")
+                return False
+                
+            global_available = gpu_status[gpu_id]['available_memory']
+            if global_available < total_required:
+                logger.warning(f"[MEM_CHECK] GPU{gpu_id}全局显存不足: 需要{total_required:.2f}GB, 可用{global_available:.2f}GB")
+                return False
+                
+            # 再检查本系统分配的显存是否足够
+            available = self.gpu_pools[gpu_id].available_memory
+            can_alloc = self.gpu_pools[gpu_id].can_allocate(total_required)
+            logger.info(f"[MEM_CHECK] GPU{gpu_id} 总需求: {total_required:.2f}GB, 可用: {available:.2f}GB, 可分配: {can_alloc}")
+            return can_alloc
+        except Exception as e:
+            logger.error(f"[MEM_CHECK] 检查GPU {gpu_id} 任务分配失败: {e}", exc_info=True)
+            return False
+        
+    def allocate_task_memory(self, gpu_id: int, task: Dict[str, Any]) -> bool:
+        """为任务分配显存"""
+        try:
+            task_id = task.get('id', 'unknown')
+            logger.info(f"[ALLOC_MEM] 开始为任务 {task_id} 分配显存")
+            
+            if gpu_id not in self.gpu_pools:
+                logger.error(f"[ALLOC_MEM] GPU{gpu_id} 不存在于显存池中")
+                return False
+                
+            model_name = task.get('model', task.get('model_name', 'medium'))
+            model_memory = self.get_estimated_memory_usage(gpu_id, model_name)
+            duration_factor = self._calculate_duration_factor(task)
+            required_memory = model_memory * duration_factor
+            
+            logger.info(f"[ALLOC_MEM] 任务 {task_id} 需要显存: {required_memory:.2f}GB (模型: {model_memory:.2f}GB × 时长因子: {duration_factor:.2f})")
+            
+            # 首先检查全局显存是否足够（使用备用机制）
+            try:
+                gpu_status = self.get_gpu_status()
+                if gpu_id not in gpu_status:
+                    logger.warning(f"[ALLOC_MEM] 无法获取GPU{gpu_id}状态，使用备用检查")
+                    # 使用备用检查：直接检查显存池
+                    if self.gpu_pools[gpu_id].available_memory >= required_memory:
+                        logger.info(f"[ALLOC_MEM] 备用检查通过，GPU{gpu_id}显存池可用: {self.gpu_pools[gpu_id].available_memory:.2f}GB")
+                    else:
+                        logger.error(f"[ALLOC_MEM] 备用检查失败，GPU{gpu_id}显存池不足: 需要{required_memory:.2f}GB, 可用{self.gpu_pools[gpu_id].available_memory:.2f}GB")
+                        return False
+                else:
+                    global_available = gpu_status[gpu_id]['available_memory']
+                    if global_available < required_memory:
+                        logger.error(f"[ALLOC_MEM] GPU{gpu_id}全局显存不足: 需要{required_memory:.2f}GB, 可用{global_available:.2f}GB")
+                        return False
+            except Exception as status_error:
+                logger.warning(f"[ALLOC_MEM] 获取GPU{gpu_id}状态失败: {status_error}，使用备用检查")
+                # 使用备用检查：直接检查显存池
+                if self.gpu_pools[gpu_id].available_memory >= required_memory:
+                    logger.info(f"[ALLOC_MEM] 备用检查通过，GPU{gpu_id}显存池可用: {self.gpu_pools[gpu_id].available_memory:.2f}GB")
+                else:
+                    logger.error(f"[ALLOC_MEM] 备用检查失败，GPU{gpu_id}显存池不足: 需要{required_memory:.2f}GB, 可用{self.gpu_pools[gpu_id].available_memory:.2f}GB")
+                    return False
+            
+            # 尝试分配显存，添加超时机制
+            try:
+                if self.gpu_pools[gpu_id].allocate(required_memory):
+                    task['allocated_memory'] = required_memory
+                    task['allocated_gpu'] = gpu_id
+                    logger.info(f"[ALLOC_MEM] 任务 {task_id} 显存分配成功")
+                    return True
+                else:
+                    logger.error(f"[ALLOC_MEM] 任务 {task_id} 显存分配失败")
+                    return False
+            except Exception as alloc_error:
+                logger.error(f"[ALLOC_MEM] 任务 {task_id} 显存分配异常: {alloc_error}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[ALLOC_MEM] 为任务 {task.get('id', 'unknown')} 分配显存失败: {e}", exc_info=True)
+            return False
+        
+    def release_task_memory(self, task: Dict[str, Any]):
+        """释放任务显存"""
+        try:
+            if 'allocated_memory' in task and 'allocated_gpu' in task:
+                gpu_id = task['allocated_gpu']
+                memory_size = task['allocated_memory']
+                
+                logger.info(f"[MEMORY] 开始释放任务 {task.get('id', 'unknown')} 在GPU{gpu_id}的显存 {memory_size:.2f}GB")
+                
+                if gpu_id in self.gpu_pools:
+                    try:
+                        self.gpu_pools[gpu_id].release(memory_size)
+                        logger.info(f"[MEMORY] 任务 {task.get('id', 'unknown')} 显存释放成功")
+                    except Exception as pool_error:
+                        logger.error(f"[MEMORY] GPU{gpu_id}显存池释放失败: {pool_error}", exc_info=True)
+                else:
+                    logger.warning(f"[MEMORY] GPU{gpu_id}不存在于显存池中")
+                    
+                # 清理任务中的分配信息
+                try:
+                    del task['allocated_memory']
+                    del task['allocated_gpu']
+                    logger.info(f"[MEMORY] 任务 {task.get('id', 'unknown')} 分配信息已清理")
+                except Exception as cleanup_error:
+                    logger.error(f"[MEMORY] 清理任务分配信息失败: {cleanup_error}", exc_info=True)
+            else:
+                logger.debug(f"[MEMORY] 任务 {task.get('id', 'unknown')} 没有分配显存信息")
+        except Exception as e:
+            logger.error(f"[MEMORY] 释放任务 {task.get('id', 'unknown')} 显存失败: {e}", exc_info=True)
+        
+    def _calculate_duration_factor(self, task: Dict[str, Any]) -> float:
+        """根据音频时长计算显存影响因子"""
+        try:
+            # 简化实现，实际应该根据音频文件计算时长
+            files = task.get('files', [])
+            if not files:
+                return 1.0
+                
+            # 假设每个文件平均时长，实际应该读取音频文件获取准确时长
+            estimated_total_duration = len(files) * 180  # 假设每个文件3分钟
+            
+            # 基于标准分段时长计算因子
+            if estimated_total_duration <= self.segment_duration:
+                return 1.0
+            else:
+                # 超长音频需要更多显存用于缓存
+                return 1.0 + (estimated_total_duration / self.segment_duration - 1) * 0.3
+        except Exception as e:
+            logger.error(f"计算任务 {task.get('id', 'unknown')} 时长因子失败: {e}", exc_info=True)
+            return 1.0
+            
+    def _get_default_estimation(self, model_name: str) -> float:
+        """获取默认显存预估"""
+        try:
+            default_estimations = {
+                'tiny': 1.0, 'base': 1.0, 'small': 2.0, 'medium': 5.0,
+                'large': 10.0, 'large-v2': 10.0, 'large-v3': 10.0, 'turbo': 4.5
+            }
+            estimation = default_estimations.get(model_name, 5.0)
+            logger.debug(f"使用默认显存预估 {model_name}: {estimation:.2f}GB")
+            return estimation
+        except Exception as e:
+            logger.error(f"获取默认显存预估失败: {e}", exc_info=True)
+            return 5.0
+    
+    def get_gpu_status(self) -> Dict[int, Dict[str, float]]:
+        """获取所有GPU状态"""
+        # 始终使用硬件级显存信息
+        try:
+            import threading
+            import time
+            
+            # 使用线程安全的超时机制
+            result = {'success': False, 'gpus': []}
+            exception = None
+            
+            def get_gpu_info_with_timeout():
+                nonlocal result, exception
+                try:
+                    result = self.gpu_manager.get_gpu_info()
+                except Exception as e:
+                    exception = e
+            
+            # 创建线程执行GPU信息获取
+            thread = threading.Thread(target=get_gpu_info_with_timeout)
+            thread.daemon = True
+            thread.start()
+            
+            # 等待5秒
+            thread.join(timeout=5.0)
+            
+            if thread.is_alive():
+                logger.error("获取GPU信息超时")
+                return {}
+            
+            if exception:
+                logger.error(f"获取GPU信息异常: {exception}")
+                return {}
+            
+            gpu_info = result
+            if not gpu_info.get('success'):
+                logger.error("获取GPU信息失败")
+                return {}
+                
+            status = {}
+            for gpu in gpu_info['gpus']:
+                gpu_id = gpu['id']
+                total_memory = gpu['total_memory']
+                allocated_memory = gpu['allocated_memory']
+                available_memory = gpu['available_memory']
+                
+                # 计算空闲显存（总显存 - 已分配显存）
+                free_memory = total_memory - allocated_memory
+                
+                status[gpu_id] = {
+                    'total_memory': total_memory,
+                    'allocated_memory': allocated_memory,
+                    'free_memory': free_memory,
+                    'available_memory': available_memory,
+                    'utilization': gpu.get('utilization', {}),
+                    'temperature': gpu.get('temperature')
+                }
+            return status
+                
+        except Exception as e:
+            logger.error(f"获取GPU状态失败: {e}", exc_info=True)
+            return {}
+    
+    def cleanup(self):
+        """清理内存管理器资源"""
+        try:
+            logger.info("[MEMORY] 开始清理内存管理器资源...")
+            
+            # 清理GPU显存池
+            for gpu_id, pool in self.gpu_pools.items():
+                try:
+                    if hasattr(pool, 'cleanup'):
+                        pool.cleanup()
+                    logger.info(f"[MEMORY] GPU{gpu_id}显存池已清理")
+                except Exception as e:
+                    logger.error(f"[MEMORY] 清理GPU{gpu_id}显存池失败: {e}", exc_info=True)
+            
+            # 清理校准数据
+            self.calibration_data.clear()
+            
+            # 清理GPU显存池字典
+            self.gpu_pools.clear()
+            
+            logger.info("[MEMORY] 内存管理器资源清理完成")
+        except Exception as e:
+            logger.error(f"[MEMORY] 清理内存管理器资源失败: {e}", exc_info=True)

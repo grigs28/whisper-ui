@@ -17,7 +17,7 @@
 
 ```
 总显存需求 = 基础模型显存 + 音频处理显存 + 批处理开销 + PyTorch开销
-推荐配置 = 总显存需求 × 1.2 (20%安全边际)
+推荐配置 = 总显存需求 × 1.1 (10%安全边际)
 ```
 
 ### 详细计算方法
@@ -76,7 +76,7 @@ print(f"推荐配置: {result['recommended']:.2f}GB")
 # 计算 large 模型，600秒分段，批大小2，int8精度
 result = gpu_manager.calculate_memory_usage(
     model_name="large",
-    segment_duration=600,
+    segment_duration=30,
     batch_size=2,
     precision="int8"
 )
@@ -93,7 +93,7 @@ for component, memory in result['breakdown'].items():
 result = gpu_manager.check_gpu_memory_sufficient(
     model_name="medium",
     gpu_ids=[0],
-    segment_duration=300,
+    segment_duration=30,
     batch_size=1,
     precision="float16"
 )
@@ -120,7 +120,7 @@ else:
 #### 调整分段长度
 ```python
 # 不同分段长度的显存影响
-segment_durations = [30, 60, 120, 300, 600]
+segment_durations = [30, 60, 120, 30, 30]
 for duration in segment_durations:
     calc = gpu_manager.calculate_memory_usage("medium", segment_duration=duration)
     print(f"{duration}秒: {calc['recommended']:.1f}GB")
@@ -190,7 +190,7 @@ def assign_optimal_model(available_memory):
 # 高性能配置 (RTX 3090, 24GB)
 high_performance = {
     "model": "large",
-    "segment_duration": 600,
+    "segment_duration": 30,
     "batch_size": 1,
     "precision": "float16",
     "max_concurrent": 2
@@ -199,7 +199,7 @@ high_performance = {
 # 平衡配置 (RTX 3070, 8GB)
 balanced = {
     "model": "medium",
-    "segment_duration": 300,
+    "segment_duration": 30,
     "batch_size": 1,
     "precision": "float16",
     "max_concurrent": 1
@@ -208,7 +208,7 @@ balanced = {
 # 节能配置 (GTX 1660, 6GB)
 efficient = {
     "model": "small",
-    "segment_duration": 120,
+    "segment_duration": 30,
     "batch_size": 1,
     "precision": "int8",
     "max_concurrent": 1
@@ -218,7 +218,7 @@ efficient = {
 ## 注意事项
 
 1. **显存计算是估算值**：实际显存占用可能因驱动版本、CUDA版本等因素有所差异
-2. **预留安全边际**：建议预留20%的显存作为安全边际
+2. **预留安全边际**：建议预留10%的显存作为安全边际
 3. **动态监控**：在实际使用中应动态监控显存使用情况
 4. **及时释放**：任务完成后及时释放模型内存
 

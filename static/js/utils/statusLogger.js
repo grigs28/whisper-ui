@@ -41,7 +41,14 @@ class StatusLogger {
             this.logs.shift();
         }
 
+        // 1. 输出到UI日志面板（现有功能）
         this.renderLog(logEntry);
+        
+        // 2. 输出到浏览器控制台（新增）
+        this.logToConsole(logEntry);
+        
+        // 3. 输出到WebSocket（新增）
+        this.sendToWebSocket(logEntry);
     }
 
     /**
@@ -258,6 +265,57 @@ class StatusLogger {
      */
     completed(message, data = {}) {
         this.addLog('completed', message, data);
+    }
+
+    /**
+     * 输出到浏览器控制台
+     */
+    logToConsole(logEntry) {
+        const consoleMethod = this.getConsoleMethod(logEntry.level);
+        const timestamp = logEntry.timestamp.toLocaleTimeString();
+        const message = `[${timestamp}] [${logEntry.level.toUpperCase()}] ${logEntry.message}`;
+        
+        if (logEntry.data) {
+            consoleMethod(message, logEntry.data);
+        } else {
+            consoleMethod(message);
+        }
+    }
+
+    /**
+     * 输出到WebSocket
+     */
+    sendToWebSocket(logEntry) {
+        if (typeof websocketManager !== 'undefined' && websocketManager.isConnected()) {
+            websocketManager.emit('client_log', {
+                level: logEntry.level,
+                message: logEntry.message,
+                data: logEntry.data,
+                timestamp: logEntry.timestamp.toISOString()
+            });
+        }
+    }
+
+    /**
+     * 获取对应的控制台方法
+     */
+    getConsoleMethod(level) {
+        const methodMap = {
+            'error': console.error,
+            'warning': console.warn,
+            'info': console.info,
+            'debug': console.debug,
+            'system': console.log,
+            'success': console.log,
+            'processing': console.log,
+            'failed': console.error,
+            'gpu': console.log,
+            'client': console.log,
+            'file': console.log,
+            'transcription': console.log,
+            'completed': console.log
+        };
+        return methodMap[level] || console.log;
     }
 }
 

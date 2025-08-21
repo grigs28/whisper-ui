@@ -1,0 +1,474 @@
+import asyncio
+import threading
+import logging
+from typing import Dict, List, Any, Optional, Callable
+from enum import Enum
+from collections import defaultdict, deque
+from dataclasses import dataclass, asdict
+from datetime import datetime
+import time
+
+from utils.logger import logger
+
+# 延迟导入，避免循环导入
+_optimized_system = None
+
+def _get_optimized_system():
+    """获取优化系统实例，使用延迟导入避免循环依赖"""
+    global _optimized_system
+    if _optimized_system is None:
+        try:
+            from core.optimized_whisper import OptimizedWhisperSystem
+            _optimized_system = OptimizedWhisperSystem()
+            logger.info("[QUEUE] 成功创建优化系统实例")
+        except ImportError as e:
+            logger.error(f"[QUEUE] 导入OptimizedWhisperSystem失败: {e}", exc_info=True)
+            return None
+        except Exception as e:
+            logger.error(f"[QUEUE] 创建优化系统实例失败: {e}", exc_info=True)
+            return None
+    
+    if _optimized_system is None:
+        logger.warning("[QUEUE] 优化系统实例为None")
+        return None
+        
+    return _optimized_system
+
+
+class TaskStatus(Enum):
+    """任务状态枚举"""
+    PENDING = "pending"           # 等待中
+    PROCESSING = "processing"     # 处理中
+    COMPLETED = "completed"       # 已完成
+    FAILED = "failed"             # 已失败
+    RETRYING = "retrying"        # 重试中
+
+
+class TaskPriority(Enum):
+    """任务优先级枚举"""
+    LOW = 1
+    NORMAL = 2
+    HIGH = 3
+    CRITICAL = 4
+
+
+@dataclass
+class Task:
+    """任务数据结构"""
+    id: str
+    user_id: str
+    files: List[str]
+    model: str
+    task_type: str
+    priority: TaskPriority
+    status: TaskStatus
+    created_at: datetime
+    updated_at: datetime
+    progress: float = 0.0
+    result: Optional[Any] = None
+    error: Optional[str] = None
+    retry_count: int = 0
+    max_retries: int = 3
+    allocated_memory: Optional[float] = None
+    allocated_gpu: Optional[int] = None
+    
+    def to_dict(self) -> Dict:
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'files': self.files,
+            'model': self.model,
+            'task_type': self.task_type,
+            'priority': self.priority.value,
+            'status': self.status.value,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'progress': self.progress,
+            'result': self.result,
+            'error': self.error,
+            'retry_count': self.retry_count,
+            'max_retries': self.max_retries,
+            'allocated_memory': self.allocated_memory,
+            'allocated_gpu': self.allocated_gpu
+        }
+
+
+class IntelligentQueueManager:
+    """智能任务队列管理器"""
+    
+    def __init__(self, max_concurrent_tasks: int = None):
+        # 按模型分组的任务队列
+        self.queues: Dict[str, deque] = defaultdict(deque)  # {model_name: deque[Task]}
+        # 任务ID到队列的映射
+        self._task_queue_mapping: Dict[str, deque] = {}  # {task_id: queue}
+        # 正在处理的任务
+        self.processing_tasks: Dict[str, Task] = {}  # {task_id: Task}
+        # 任务状态回调
+        self.status_callbacks: List[Callable] = []
+        
+        # 并发控制
+        from config import config
+        self.max_concurrent_tasks = max_concurrent_tasks or config.MAX_CONCURRENT_TRANSCRIPTIONS
+        self.current_tasks = 0
+        self._lock = threading.RLock()
+        
+        # 统计信息
+        self.stats = {
+            'total_added': 0,
+            'total_completed': 0,
+            'total_failed': 0,
+            'total_retried': 0
+        }
+        
+    def add_task(self, task: Task) -> bool:
+        """添加任务到队列"""
+        with self._lock:
+            try:
+                self.queues[task.model].append(task)
+                # 添加到映射
+                self._task_queue_mapping[task.id] = self.queues[task.model]
+                self.stats['total_added'] += 1
+                logger.info(f"[QUEUE] 添加任务 {task.id} 到 {task.model} 队列, 当前队列长度: {len(self.queues[task.model])}")
+                self._notify_status_change(task)
+                return True
+            except Exception as e:
+                logger.error(f"[QUEUE] 添加任务 {task.id} 失败: {e}", exc_info=True)
+                return False
+                
+    def get_next_task(self, model_name: str) -> Optional[Task]:
+        """获取指定模型的下一个任务"""
+        with self._lock:
+            try:
+                if model_name in self.queues and self.queues[model_name]:
+                    task = self.queues[model_name].popleft()
+                    # 从映射中移除
+                    if task.id in self._task_queue_mapping:
+                        del self._task_queue_mapping[task.id]
+                    logger.debug(f"[QUEUE] 从 {model_name} 队列获取任务 {task.id}")
+                    return task
+                logger.debug(f"[QUEUE] {model_name} 队列为空或不存在")
+                return None
+            except Exception as e:
+                logger.error(f"[QUEUE] 获取任务失败: {e}", exc_info=True)
+                return None
+            
+    def get_tasks_by_model(self, model_name: str) -> List[Task]:
+        """获取指定模型的所有任务"""
+        with self._lock:
+            return list(self.queues.get(model_name, []))
+            
+    def move_task_to_processing(self, task: Task) -> bool:
+        """将任务移动到处理中状态"""
+        with self._lock:
+            try:
+                if self.current_tasks >= self.max_concurrent_tasks:
+                    logger.warning(f"[QUEUE] 达到最大并发任务数 {self.max_concurrent_tasks}")
+                    return False
+                
+                # 从原队列中移除任务
+                if task.model in self.queues:
+                    try:
+                        self.queues[task.model].remove(task)
+                        logger.debug(f"[QUEUE] 从 {task.model} 队列中移除任务 {task.id}")
+                    except ValueError:
+                        logger.warning(f"[QUEUE] 任务 {task.id} 不在 {task.model} 队列中")
+                
+                # 从映射中移除
+                if task.id in self._task_queue_mapping:
+                    del self._task_queue_mapping[task.id]
+                    
+                task.status = TaskStatus.PROCESSING
+                task.updated_at = datetime.now()
+                self.processing_tasks[task.id] = task
+                self.current_tasks += 1
+                self._notify_status_change(task)
+                logger.info(f"[QUEUE] 任务 {task.id} 进入处理状态, 当前处理中任务数: {self.current_tasks}")
+                return True
+            except Exception as e:
+                logger.error(f"[QUEUE] 移动任务到处理状态失败: {e}", exc_info=True)
+                return False
+            
+    def complete_task(self, task_id: str, result: Any = None) -> bool:
+        """标记任务为完成"""
+        logger.info(f"[QUEUE] 开始完成任务 {task_id}")
+        with self._lock:
+            try:
+                if task_id not in self.processing_tasks:
+                    logger.warning(f"[QUEUE] 尝试完成不存在的任务 {task_id}")
+                    return False
+                    
+                task = self.processing_tasks[task_id]
+                logger.info(f"[QUEUE] 找到任务 {task_id}，开始处理")
+                
+                # 释放任务显存
+                try:
+                    logger.info(f"[QUEUE] 开始释放任务 {task_id} 的显存")
+                    # 通过优化系统实例释放显存
+                    system = _get_optimized_system()
+                    if system and hasattr(system, 'memory_pool') and hasattr(system.memory_pool, 'release_task_memory'):
+                        task_dict = task.to_dict()
+                        system.memory_pool.release_task_memory(task_dict)
+                        logger.info(f"[QUEUE] 任务 {task_id} 显存已释放")
+                    else:
+                        logger.warning(f"[QUEUE] 无法获取优化系统实例或内存池")
+                except Exception as e:
+                    logger.error(f"[QUEUE] 释放任务 {task_id} 显存失败: {e}", exc_info=True)
+                    # 继续执行，不因为显存释放失败而中断任务完成流程
+                
+                # 更新任务状态为完成
+                try:
+                    logger.info(f"[QUEUE] 更新任务 {task_id} 状态为完成")
+                    task.status = TaskStatus.COMPLETED
+                    task.result = result
+                    task.progress = 100.0
+                    task.updated_at = datetime.now()
+                except Exception as e:
+                    logger.error(f"[QUEUE] 更新任务 {task_id} 状态失败: {e}", exc_info=True)
+                    return False
+                
+                # 从处理中队列移除
+                try:
+                    logger.info(f"[QUEUE] 从处理中队列移除任务 {task_id}")
+                    del self.processing_tasks[task_id]
+                    self.current_tasks -= 1
+                    self.stats['total_completed'] += 1
+                    logger.info(f"[QUEUE] 任务 {task_id} 完成, 剩余处理中任务数: {self.current_tasks}")
+                except Exception as e:
+                    logger.error(f"[QUEUE] 从处理中队列移除任务 {task_id} 失败: {e}", exc_info=True)
+                    return False
+                
+                # 异步通知状态变更，避免阻塞
+                try:
+                    logger.info(f"[QUEUE] 开始通知任务 {task_id} 状态变更")
+                    self._notify_status_change(task)
+                    logger.info(f"[QUEUE] 任务 {task_id} 状态变更通知完成")
+                except Exception as notify_error:
+                    logger.warning(f"[QUEUE] 通知任务状态变更失败: {notify_error}")
+                    # 通知失败不影响任务完成
+                
+                logger.info(f"[QUEUE] 任务 {task_id} 完成处理结束")
+                return True
+            except Exception as e:
+                logger.error(f"[QUEUE] 完成任务失败: {e}", exc_info=True)
+                return False
+            
+    def fail_task(self, task_id: str, error: str, should_retry: bool = True) -> bool:
+        """标记任务为失败"""
+        with self._lock:
+            try:
+                # 先检查处理中任务
+                if task_id in self.processing_tasks:
+                    task = self.processing_tasks[task_id]
+                else:
+                    # 检查队列中的任务
+                    task = self._find_task_in_queues(task_id)
+                    if not task:
+                        logger.warning(f"[QUEUE] 尝试失败不存在的任务 {task_id}")
+                        return False
+                
+                # 释放任务显存
+                try:
+                    # 通过优化系统实例释放显存
+                    system = _get_optimized_system()
+                    if system and hasattr(system, 'memory_pool') and hasattr(system.memory_pool, 'release_task_memory'):
+                        task_dict = task.to_dict()
+                        system.memory_pool.release_task_memory(task_dict)
+                        logger.info(f"[QUEUE] 失败任务 {task_id} 显存已释放")
+                except Exception as e:
+                    logger.error(f"[QUEUE] 释放失败任务 {task_id} 显存失败: {e}", exc_info=True)
+                    # 继续执行，不因为显存释放失败而中断任务失败流程
+                
+                # 更新任务状态
+                try:
+                    task.error = error
+                    task.updated_at = datetime.now()
+                except Exception as e:
+                    logger.error(f"[QUEUE] 更新失败任务 {task_id} 状态失败: {e}", exc_info=True)
+                    return False
+                
+                # 如果需要重试且重试次数未达上限
+                if should_retry and task.retry_count < task.max_retries:
+                    try:
+                        task.status = TaskStatus.RETRYING
+                        task.retry_count += 1
+                        self.stats['total_retried'] += 1
+                        
+                        # 重新加入队列头部
+                        if task.id in self.processing_tasks:
+                            del self.processing_tasks[task.id]
+                            self.current_tasks -= 1
+                        self.queues[task.model].appendleft(task)
+                        # 更新映射
+                        self._task_queue_mapping[task.id] = self.queues[task.model]
+                        logger.info(f"[QUEUE] 任务 {task_id} 失败, 将重试 (第{task.retry_count}次)")
+                    except Exception as e:
+                        logger.error(f"[QUEUE] 重试任务 {task_id} 失败: {e}", exc_info=True)
+                        return False
+                else:
+                    try:
+                        task.status = TaskStatus.FAILED
+                        # 从处理中队列移除
+                        if task.id in self.processing_tasks:
+                            del self.processing_tasks[task.id]
+                            self.current_tasks -= 1
+                        self.stats['total_failed'] += 1
+                        logger.info(f"[QUEUE] 任务 {task_id} 失败, 达到最大重试次数")
+                    except Exception as e:
+                        logger.error(f"[QUEUE] 标记任务 {task_id} 为失败状态失败: {e}", exc_info=True)
+                        return False
+                    
+                # 通知状态变更
+                try:
+                    self._notify_status_change(task)
+                except Exception as notify_error:
+                    logger.warning(f"[QUEUE] 通知失败任务状态变更失败: {notify_error}")
+                    # 通知失败不影响任务失败流程
+                
+                return True
+            except Exception as e:
+                logger.error(f"[QUEUE] 标记任务失败失败: {e}", exc_info=True)
+                return False
+            
+    def retry_task(self, task_id: str) -> bool:
+        """重试任务"""
+        with self._lock:
+            try:
+                # 从失败状态中移除任务并重新加入队列
+                task = None
+                # 查找处理中任务
+                if task_id in self.processing_tasks:
+                    task = self.processing_tasks[task_id]
+                # 查找队列中的任务
+                if not task:
+                    task = self._find_task_in_queues(task_id)
+                    
+                if not task:
+                    logger.warning(f"[QUEUE] 尝试重试不存在的任务 {task_id}")
+                    return False
+                    
+                # 重置任务状态
+                task.status = TaskStatus.PENDING
+                task.error = None
+                task.updated_at = datetime.now()
+                task.retry_count += 1
+                
+                # 确保任务在队列中
+                if task_id in self.processing_tasks:
+                    del self.processing_tasks[task_id]
+                    self.current_tasks -= 1
+                    
+                # 如果任务不在队列中，则添加到队列
+                if task not in self.queues[task.model]:
+                    self.queues[task.model].appendleft(task)
+                    # 更新映射
+                    self._task_queue_mapping[task.id] = self.queues[task.model]
+                    
+                self.stats['total_retried'] += 1
+                self._notify_status_change(task)
+                logger.info(f"[QUEUE] 任务 {task_id} 重新排队等待处理")
+                return True
+            except Exception as e:
+                logger.error(f"[QUEUE] 重试任务失败: {e}", exc_info=True)
+                return False
+            
+    def update_task_progress(self, task_id: str, progress: float):
+        """更新任务进度"""
+        with self._lock:
+            try:
+                task = self.processing_tasks.get(task_id)
+                if task:
+                    task.progress = progress
+                    task.updated_at = datetime.now()
+                    # 进度更新通常不触发状态变更通知以避免过多通知
+            except Exception as e:
+                logger.error(f"[QUEUE] 更新任务进度失败: {e}", exc_info=True)
+                
+    def get_queue_stats(self) -> Dict[str, Any]:
+        """获取队列统计信息"""
+        with self._lock:
+            model_stats = {}
+            for model_name, queue in self.queues.items():
+                model_stats[model_name] = {
+                    'pending': len(queue),
+                    'processing': len([t for t in self.processing_tasks.values() if t.model == model_name])
+                }
+                
+            return {
+                'models': model_stats,
+                'total_pending': sum(len(q) for q in self.queues.values()),
+                'total_processing': self.current_tasks,
+                'stats': self.stats.copy()
+            }
+            
+    def add_status_callback(self, callback: Callable):
+        """添加状态变更回调"""
+        with self._lock:
+            self.status_callbacks.append(callback)
+            
+    def _notify_status_change(self, task: Task):
+        """通知任务状态变更"""
+        for callback in self.status_callbacks:
+            try:
+                callback(task.to_dict())
+            except Exception as e:
+                logger.error(f"[QUEUE] 状态回调执行失败: {e}", exc_info=True)
+                
+    def _find_task_in_queues(self, task_id: str) -> Optional[Task]:
+        """在所有队列中查找任务"""
+        try:
+            # 使用映射快速查找
+            if task_id in self._task_queue_mapping:
+                queue = self._task_queue_mapping[task_id]
+                return next((t for t in queue if t.id == task_id), None)
+            
+            # 回退到遍历查找（用于处理映射不一致的情况）
+            for queue in self.queues.values():
+                for task in queue:
+                    if task.id == task_id:
+                        # 修复映射
+                        self._task_queue_mapping[task_id] = queue
+                        return task
+            return None
+        except Exception as e:
+            logger.error(f"[QUEUE] 查找任务失败: {e}", exc_info=True)
+            return None
+        
+    def get_task(self, task_id: str) -> Optional[Task]:
+        """获取任务信息"""
+        with self._lock:
+            try:
+                # 先查找处理中的任务
+                if task_id in self.processing_tasks:
+                    return self.processing_tasks[task_id]
+                # 再查找队列中的任务
+                return self._find_task_in_queues(task_id)
+            except Exception as e:
+                logger.error(f"[QUEUE] 获取任务信息失败: {e}", exc_info=True)
+                return None
+            
+    def remove_task(self, task_id: str) -> bool:
+        """移除任务"""
+        with self._lock:
+            try:
+                # 从处理中任务移除
+                if task_id in self.processing_tasks:
+                    del self.processing_tasks[task_id]
+                    self.current_tasks -= 1
+                    # 从映射中移除
+                    if task_id in self._task_queue_mapping:
+                        del self._task_queue_mapping[task_id]
+                    return True
+                    
+                # 从队列中移除
+                if task_id in self._task_queue_mapping:
+                    queue = self._task_queue_mapping[task_id]
+                    task = next((t for t in queue if t.id == task_id), None)
+                    if task:
+                        queue.remove(task)
+                        del self._task_queue_mapping[task_id]
+                        return True
+                        
+                return False
+            except Exception as e:
+                logger.error(f"[QUEUE] 移除任务失败: {e}", exc_info=True)
+                return False

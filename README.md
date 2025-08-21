@@ -88,7 +88,7 @@ scoop install ffmpeg
 
 4. **访问应用**
    
-   在浏览器中打开: `http://localhost:5551`
+   在浏览器中打开: `http://localhost:5552`
 
 ## 📖 使用说明
 
@@ -188,6 +188,18 @@ whisper-ui/
 ### ⚡ GPU支持
 如果系统有NVIDIA GPU且已安装CUDA，程序会自动检测并使用GPU加速转录。否则将使用CPU进行转录。
 
+## 🔍 GPU信息获取
+
+系统提供了多种方式来获取GPU信息：
+
+1. **HTTP API接口**：访问 `/gpu_info` 接口可获取当前GPU的详细信息，包括名称、总内存、已分配内存、可用内存等。
+
+2. **前端页面**：Web界面会自动加载并显示GPU使用情况。
+
+3. **后端调用**：在代码中可通过以下方式获取GPU信息：
+   - `gpu_manager.get_gpu_info()` 方法
+   - `optimized_whisper_system.get_system_status()` 方法，其中包含 `gpu_status` 字段
+
 ## 🤝 贡献指南
 
 欢迎贡献代码！请随时提交 Pull Request。
@@ -212,7 +224,6 @@ whisper-ui/
 ---
 
 ## English
-
 **🎵 Whisper Audio Transcription System**
 
 A modern audio transcription system based on OpenAI Whisper, featuring an intuitive web interface with multi-file batch processing, real-time progress monitoring, and GPU acceleration.
@@ -292,7 +303,7 @@ scoop install ffmpeg
 
 4. **Access the application**
    
-   Open your browser and visit: `http://localhost:5551`
+   Open your browser and visit: `http://localhost:5552`
 
 **📖 Documentation**
 
