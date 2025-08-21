@@ -33,6 +33,7 @@ outputs/*
 !outputs/.gitkeep
 
 # Environment variables
+.env
 .env.local
 .env.production
 
