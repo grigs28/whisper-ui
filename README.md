@@ -14,8 +14,7 @@
 1. **🎯 需求分析与架构设计**：由 **Trae AI** 生成详细的开发提示词和技术规范
 2. **🏗️ 基础代码生成**：使用本地部署的 **cpatonn/Qwen3-Coder-30B-A3B-Instruct-AWQ-8bit** 模型创建项目文件和目录结构
 3. **✨ 精细化调优**：由 **Trae AI** 完成界面优化、功能完善和用户体验提升
-
-这种AI协作开发模式确保了代码质量和开发效率的完美平衡。
+4. **🤖 AI助手集成**：由 **Cursor** 提供智能代码生成、问题诊断和开发指导支持
 
 [English](#english) | [简体中文](#简体中文)
 
@@ -146,19 +145,34 @@ scoop install ffmpeg
 - **WebSocket**: 实时通信
 - **Drag & Drop API**: 文件拖拽上传
 
+### 🛠️ 开发工具
+
+- **Cursor**: AI驱动的智能开发助手
+  - 代码生成和优化
+  - 项目规范维护
+  - 问题诊断和解决
+  - 开发效率提升
+- **Git**: 版本控制
+- **Conda**: 环境管理
+- **FFmpeg**: 音频处理
+
 ### 📁 项目结构
 
 ```
 whisper-ui/
 ├── main.py              # 主程序入口
 ├── requirements.txt     # 依赖列表
+├── .cursor/             # Cursor AI助手配置
+│   ├── rules/          # AI助手规则文件
+│   └── settings.json   # Cursor配置文件
 ├── static/             # 静态资源
 │   ├── css/           # 样式文件
 │   └── js/            # JavaScript文件
 ├── templates/          # HTML模板
 ├── uploads/           # 上传文件目录
 ├── outputs/           # 输出文件目录
-└── logs/              # 日志文件目录
+├── logs/              # 日志文件目录
+└── test/              # 测试目录（本地开发）
 ```
 
 ## 🔧 故障排除
