@@ -21,6 +21,8 @@ class GPUMonitor {
         // 初始化状态
         this.isMonitoring = false;
         this.clickHandler = null;
+        this.gpuSelectorInitialized = false;  // 添加GPU选择器初始化标志
+        this.gpuSelectionLogged = false;      // 添加GPU选择日志标志
 
         // 初始化GPU监控
         this.init();
@@ -92,8 +94,11 @@ class GPUMonitor {
             // 更新GPU信息显示
             this.updateGPUInfoDisplay(gpuInfo);
 
-            // 更新GPU选择器
-            this.updateGPUSelector(gpuInfo);
+            // 只在初始化时更新GPU选择器，避免重复日志
+            if (!this.gpuSelectorInitialized) {
+                this.updateGPUSelector(gpuInfo);
+                this.gpuSelectorInitialized = true;
+            }
         } catch (error) {
             console.error('获取GPU信息时出错:', error);
 
@@ -239,6 +244,7 @@ class GPUMonitor {
         const modelSelector = document.getElementById('modelSelector');
         if (modelSelector) {
             modelSelector.addEventListener('change', () => {
+                // 只在模型变化时执行智能选择
                 this.smartSelectGPU();
             });
         }
@@ -287,11 +293,14 @@ class GPUMonitor {
             if (selectorData.default_selection) {
                 gpuSelector.value = selectorData.default_selection;
 
-                // 记录自动选择的信息
-                if (selectorData.best_gpu_id !== null) {
-                    statusLogger.info(`已自动选择显存剩余最多的GPU: GPU ${selectorData.best_gpu_id}`);
-                } else {
-                    statusLogger.info('未检测到可用GPU，已选择CPU处理');
+                // 只在初始化时记录自动选择的信息，避免重复日志
+                if (!this.gpuSelectionLogged) {
+                    if (selectorData.best_gpu_id !== null) {
+                        statusLogger.info(`已自动选择显存剩余最多的GPU: GPU ${selectorData.best_gpu_id}`);
+                    } else {
+                        statusLogger.info('未检测到可用GPU，已选择CPU处理');
+                    }
+                    this.gpuSelectionLogged = true;
                 }
             }
 

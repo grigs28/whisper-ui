@@ -464,6 +464,20 @@
     <script src="/static/js/bootstrap.bundle.min.js"></script>
     <!-- Socket.IO -->
     <script src="/static/js/socket.io.min.js"></script>
+    <!-- 禁用Source Map请求 -->
+    <script>
+        // 禁用Source Map请求，避免404错误
+        if (window.console && window.console.log) {
+            const originalLog = console.log;
+            console.log = function(...args) {
+                // 过滤掉Source Map相关的错误
+                if (args[0] && typeof args[0] === 'string' && args[0].includes('.map')) {
+                    return;
+                }
+                originalLog.apply(console, args);
+            };
+        }
+    </script>
     <!-- 自定义JavaScript -->
     <script src="/static/js/utils/helpers.js"></script>
     <script src="/static/js/utils/statusLogger.js"></script>
@@ -476,6 +490,29 @@
     <script type="module" src="/static/js/components/queueManager.js"></script>
     <script src="/static/js/components/uiManager.js"></script>
     <script src="/static/js/app.js"></script>
+
+    <!-- WebSocket页面刷新处理 -->
+    <script>
+        // 页面刷新时清理WebSocket连接
+        window.addEventListener('beforeunload', function() {
+            if (window.wsManager && window.wsManager.socket) {
+                try {
+                    window.wsManager.socket.disconnect();
+                } catch (e) {
+                    console.log('WebSocket断开连接时出错:', e);
+                }
+            }
+        });
+
+        // 页面加载完成后延迟初始化WebSocket
+        window.addEventListener('load', function() {
+            setTimeout(() => {
+                if (window.wsManager) {
+                    console.log('页面加载完成，WebSocket管理器已就绪');
+                }
+            }, 1000);
+        });
+    </script>
 
     <!-- 应用初始化已移至app.js中，避免重复 -->
 

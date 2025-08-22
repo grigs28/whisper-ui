@@ -21,14 +21,22 @@ class WebSocketManager {
         const wsUrl = `${wsProtocol}//${window.location.host}`;
         
         this.socket = io(wsUrl, {
-            transports: ['websocket'],
+            transports: ['websocket', 'polling'],  // 支持多种传输方式
             reconnection: true,
             reconnectionAttempts: this.maxReconnectAttempts,
             reconnectionDelay: this.reconnectDelay,
-            timeout: 10000
+            reconnectionDelayMax: 5000,  // 最大重连延迟5秒
+            timeout: 20000,  // 增加超时时间到20秒
+            pingTimeout: 120000,  // 120秒ping超时
+            pingInterval: 30000,   // 30秒ping间隔
+            forceNew: true,  // 强制新连接
+            autoConnect: true  // 自动连接
         });
 
         this.setupEventListeners();
+        
+        // 启动连接健康监控
+        this.startHealthMonitor();
     }
 
     /**
@@ -45,6 +53,14 @@ class WebSocketManager {
             // console.log('WebSocket connected'); // 已通过statusLogger.system记录
         });
 
+        this.socket.on('connection_ack', (data) => {
+            // 收到服务器连接确认
+            statusLogger.success('WebSocket连接已确认', { 
+                status: data.status,
+                timestamp: new Date().toISOString()
+            });
+        });
+
         this.socket.on('disconnect', (reason) => {
             this.isConnected = false;
             statusLogger.warning('WebSocket连接已断开', { 
@@ -52,6 +68,10 @@ class WebSocketManager {
                 timestamp: new Date().toISOString(),
                 host: window.location.host
             });
+            
+            // 分析断开原因
+            this.analyzeDisconnectReason(reason);
+            
             // console.log('WebSocket disconnected:', reason); // 已通过statusLogger.warning记录
         });
 
@@ -61,6 +81,14 @@ class WebSocketManager {
                 timestamp: new Date().toISOString(),
                 host: window.location.host
             });
+            
+            // 如果是页面刷新导致的错误，尝试重新连接
+            if (error.message.includes('500') || error.message.includes('write()')) {
+                setTimeout(() => {
+                    this.reconnect();
+                }, 1000);
+            }
+            
             // console.error('WebSocket connection error:', error); // 已通过statusLogger.error记录
         });
 
@@ -93,6 +121,22 @@ class WebSocketManager {
 
         this.socket.on('log_message', (data) => {
             this.handleLogMessage(data);
+        });
+
+        this.socket.on('server_heartbeat', (data) => {
+            // 收到服务器心跳，回复确认
+            this.emit('heartbeat_ack', { 
+                timestamp: Date.now(),
+                server_timestamp: data.timestamp 
+            });
+        });
+
+        this.socket.on('heartbeat_response', (data) => {
+            // 收到心跳响应
+            const latency = Date.now() - data.timestamp;
+            if (latency > 5000) {  // 如果延迟超过5秒
+                statusLogger.warning(`WebSocket心跳延迟较高: ${latency}ms`);
+            }
         });
     }
 
@@ -235,10 +279,76 @@ class WebSocketManager {
     }
 
     /**
+     * 分析断开原因
+     */
+    analyzeDisconnectReason(reason) {
+        let message = '';
+        switch(reason) {
+            case 'io server disconnect':
+                message = '服务器主动断开连接';
+                break;
+            case 'io client disconnect':
+                message = '客户端主动断开连接';
+                break;
+            case 'ping timeout':
+                message = '心跳超时，网络连接不稳定';
+                break;
+            case 'transport close':
+                message = '传输层连接关闭';
+                break;
+            case 'transport error':
+                message = '传输层错误';
+                break;
+            default:
+                message = `未知原因: ${reason}`;
+        }
+        statusLogger.error(`WebSocket断开原因: ${message}`, { reason });
+    }
+
+    /**
      * 检查WebSocket连接状态
      */
-    isConnected() {
+    getConnectionStatus() {
         return this.socket && this.socket.connected;
+    }
+
+    /**
+     * 检查WebSocket连接状态（兼容性方法）
+     */
+    isConnected() {
+        return this.getConnectionStatus();
+    }
+
+    /**
+     * 监控WebSocket连接健康状态
+     */
+    startHealthMonitor() {
+        // 每60秒检查一次连接状态，进一步减少频率
+        setInterval(() => {
+            if (!this.getConnectionStatus()) {
+                statusLogger.warning('WebSocket连接已断开，尝试重新连接...');
+                this.reconnect();
+            } else {
+                // 发送心跳测试，但进一步减少频率
+                this.emit('heartbeat_test', { timestamp: Date.now() });
+            }
+        }, 60000);  // 增加到60秒，进一步减少请求频率
+    }
+
+    /**
+     * 重新连接
+     */
+    reconnect() {
+        if (this.socket) {
+            try {
+                this.socket.disconnect();
+                setTimeout(() => {
+                    this.socket.connect();
+                }, 1000);
+            } catch (error) {
+                statusLogger.error('WebSocket重连失败', { error: error.message });
+            }
+        }
     }
 }
 

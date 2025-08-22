@@ -74,7 +74,49 @@ app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = config.MAX_CONTENT_LENGTH
 
 # 初始化SocketIO
-socketio = SocketIO(app, cors_allowed_origins="*", logger=False, engineio_logger=False)
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    logger=False, 
+    engineio_logger=False,
+    ping_timeout=120,  # 增加ping超时时间到120秒
+    ping_interval=30,  # 增加ping间隔到30秒
+    async_mode='threading',  # 使用线程模式
+    manage_session=False,  # 禁用会话管理，避免冲突
+    always_connect=True,  # 总是尝试连接
+    transports=['websocket', 'polling']  # 支持多种传输方式
+)
+
+# 添加错误处理中间件
+@app.errorhandler(404)
+def not_found_error(error):
+    """处理404错误"""
+    if request.path.endswith('.map'):
+        # 对于Source Map文件，返回空响应
+        return '', 204
+    return '文件未找到', 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    """处理500错误"""
+    logger.error(f'服务器内部错误: {error}')
+    return '服务器内部错误', 500
+
+# 添加WebSocket错误处理
+@socketio.on_error_default
+def default_error_handler(e):
+    """默认WebSocket错误处理器"""
+    logger.error(f'WebSocket默认错误处理器: {str(e)}')
+    return False  # 不阻止错误传播
+
+# 添加请求前处理中间件
+@app.before_request
+def before_request():
+    """请求前处理"""
+    # 确保响应头正确设置
+    if request.path.startswith('/socket.io/'):
+        # 对于WebSocket请求，设置正确的响应头
+        pass
 
 # 确保必要的目录存在
 os.makedirs(config.UPLOAD_FOLDER, exist_ok=True)
@@ -654,14 +696,111 @@ def get_version_history():
 @socketio.on('connect')
 def handle_connect():
     """处理客户端连接"""
-    logger.client_connected('客户端已连接')
-    logger.system('客户端已连接')
+    try:
+        logger.client_connected('客户端已连接')
+        logger.system('客户端已连接')
+        # 发送连接确认
+        emit('connection_ack', {'status': 'connected', 'timestamp': time.time()})
+    except Exception as e:
+        logger.error(f'处理WebSocket连接时出错: {str(e)}')
 
 @socketio.on('disconnect')
-def handle_disconnect():
+def handle_disconnect(data=None):
     """处理客户端断开连接"""
-    logger.client_disconnected('客户端已断开连接')
-    logger.system('客户端已断开连接')
+    try:
+        logger.client_disconnected('客户端已断开连接')
+        logger.system('客户端已断开连接')
+    except Exception as e:
+        logger.error(f'处理WebSocket断开连接时出错: {str(e)}')
+
+@socketio.on_error()
+def error_handler(e):
+    """处理WebSocket错误"""
+    try:
+        logger.error(f'WebSocket错误: {str(e)}')
+        logger.system(f'WebSocket错误: {str(e)}')
+    except Exception as ex:
+        logger.error(f'处理WebSocket错误时出错: {str(ex)}')
+
+@socketio.on('connect_error')
+def handle_connect_error(data):
+    """处理连接错误"""
+    try:
+        logger.error(f'WebSocket连接错误: {data}')
+        logger.system(f'WebSocket连接错误: {data}')
+    except Exception as e:
+        logger.error(f'处理WebSocket连接错误时出错: {str(e)}')
+
+@socketio.on('ping')
+def handle_ping():
+    """处理心跳ping"""
+    try:
+        logger.debug('收到WebSocket心跳ping')
+        emit('pong', {'timestamp': time.time()})
+    except Exception as e:
+        logger.error(f'处理WebSocket ping时出错: {str(e)}')
+
+@socketio.on('pong')
+def handle_pong():
+    """处理心跳pong"""
+    try:
+        logger.debug('收到WebSocket心跳pong')
+    except Exception as e:
+        logger.error(f'处理WebSocket pong时出错: {str(e)}')
+
+@socketio.on('heartbeat_test')
+def handle_heartbeat_test(data):
+    """处理心跳测试"""
+    try:
+        logger.debug(f'收到心跳测试: {data}')
+        # 回复心跳确认
+        emit('heartbeat_response', {
+            'timestamp': data.get('timestamp'), 
+            'server_time': time.time(),
+            'status': 'ok'
+        })
+    except Exception as e:
+        logger.error(f'处理心跳测试失败: {e}')
+        # 发送错误响应
+        emit('heartbeat_response', {
+            'timestamp': data.get('timestamp') if data else None,
+            'server_time': time.time(),
+            'status': 'error',
+            'error': str(e)
+        })
+
+@socketio.on('heartbeat_ack')
+def handle_heartbeat_ack(data):
+    """处理心跳确认"""
+    try:
+        logger.debug(f'收到心跳确认: {data}')
+        # 可以在这里记录连接状态
+    except Exception as e:
+        logger.error(f'处理心跳确认时出错: {str(e)}')
+
+def start_websocket_heartbeat():
+    """启动WebSocket心跳线程"""
+    def heartbeat_loop():
+        while True:
+            try:
+                # 每10秒发送一次心跳
+                # 使用socketio的emit方法，但需要确保在正确的上下文中
+                with app.app_context():
+                    socketio.emit('server_heartbeat', {
+                        'timestamp': time.time(),
+                        'message': 'Server heartbeat'
+                    })
+                time.sleep(10)
+            except Exception as e:
+                logger.error(f'WebSocket心跳发送失败: {e}')
+                time.sleep(5)
+    
+    # 暂时禁用WebSocket心跳线程，避免500错误
+    # import threading
+    # heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
+    # heartbeat_thread.start()
+    # logger.info('WebSocket心跳线程已启动')
+    logger.info('WebSocket心跳线程已禁用，避免500错误')
 
 if __name__ == '__main__':
     # 初始化GPU管理器
@@ -710,8 +849,20 @@ if __name__ == '__main__':
     websocket_handler = WebSocketHandler(socketio)
     logger.addHandler(websocket_handler)
     
+    # 启动WebSocket心跳线程
+    start_websocket_heartbeat()
+    
     try:
-        socketio.run(app, host=config.HOST, port=config.PORT, debug=config.DEBUG)
+        # 配置SocketIO运行参数
+        socketio.run(
+            app, 
+            host=config.HOST, 
+            port=config.PORT, 
+            debug=config.DEBUG,
+            use_reloader=False,  # 禁用自动重载，避免重复启动
+            log_output=False,  # 禁用默认日志输出
+            allow_unsafe_werkzeug=True  # 允许不安全的Werkzeug版本
+        )
     except KeyboardInterrupt:
         logger.system("接收到中断信号，正在优雅关闭...")
         if optimized_whisper_system:

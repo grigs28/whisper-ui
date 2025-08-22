@@ -14,10 +14,8 @@ document.addEventListener('DOMContentLoaded', function() {
 function initializeApp() {
     statusLogger.system('初始化应用程序...');
     
-    // 初始化GPU选择器
-    if (typeof gpuMonitor !== 'undefined') {
-        gpuMonitor.updateGPUSelector();
-    }
+    // 初始化GPU选择器（GPU监控组件会自动处理初始化）
+    // 避免重复调用，由gpuMonitor.init()统一处理
     
     // 初始化模型内存需求显示
     if (typeof uiManager !== 'undefined') {

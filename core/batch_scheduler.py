@@ -124,8 +124,8 @@ class BatchTaskScheduler:
                     if status['available_memory'] > 1.0:  # 保留1GB安全边际
                         self._schedule_tasks_for_gpu(gpu_id, status)
                         
-                # 短暂休眠避免过度占用CPU
-                time.sleep(0.1)
+                # 短暂休眠避免过度占用CPU，同时确保WebSocket心跳正常
+                time.sleep(1.0)  # 增加休眠时间，减少CPU占用，给WebSocket更多响应时间
                 
             except Exception as e:
                 logger.error(f"[SCHEDULER] 调度循环出错: {e}", exc_info=True)

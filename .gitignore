@@ -32,6 +32,13 @@ uploads/*
 outputs/*
 !outputs/.gitkeep
 
+# Test directory (exclude from git)
+test/
+test_*.py
+*_test.py
+test_results/
+test_outputs/
+
 # Environment variables
 .env
 .env.local

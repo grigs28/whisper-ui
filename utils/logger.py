@@ -65,7 +65,15 @@ file_handler = RotatingFileHandler(
 )
 file_handler.setLevel(getattr(logging, config.LOG_LEVEL))
 
-# 按时间轮转的文件处理器已禁用，只保留app.log
+# 创建按时间轮转的文件处理器
+timed_file_handler = TimedRotatingFileHandler(
+    config.LOG_FILE.replace('.log', '_timed.log'),
+    when='midnight',
+    interval=1,
+    backupCount=config.TIMED_LOG_BACKUP_COUNT
+)
+timed_file_handler.setFormatter(formatter)
+timed_file_handler.setLevel(getattr(logging, config.LOG_LEVEL))
 
 # 创建结构化日志处理器（根据配置决定是否启用）
 structured_file_handler = None
@@ -96,6 +104,7 @@ file_handler.setFormatter(formatter)
 # 添加处理器到logger
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
+logger.addHandler(timed_file_handler)
 
 # 根据配置添加结构化日志处理器
 if structured_file_handler:
@@ -375,11 +384,21 @@ class WebSocketHandler(logging.Handler):
                 'message': message,
                 'timestamp': datetime.fromtimestamp(record.created).strftime('%H:%M:%S')
             }
-            # 通过WebSocket发送日志到前端
+            
+            # 通过WebSocket发送日志到前端，添加错误处理
             if self.socketio:
-                self.socketio.emit('log_message', log_entry)
-        except Exception:
-            # 避免日志处理错误导致程序崩溃
+                try:
+                    self.socketio.emit('log_message', log_entry)
+                except Exception as ws_error:
+                    # WebSocket发送失败时不中断程序，只在控制台输出错误
+                    print(f"WebSocket日志发送失败: {ws_error}")
+                
+            # 同时在终端输出带时间戳的消息
+            timestamp = datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S')
+            print(f"[{timestamp}] {message}")
+        except Exception as e:
+            # 避免日志处理错误导致程序崩溃，只在控制台输出错误
+            print(f"WebSocket日志处理器错误: {e}")
             pass
 
 # 在应用启动时添加WebSocket处理器（需要在main.py中初始化）

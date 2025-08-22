@@ -63,7 +63,7 @@ class QueueManager {
         this.refreshInterval = setInterval(() => {
             this.loadQueueState();
         }, 5000);
-        
+
         // 当页面失去焦点时停止刷新，获得焦点时恢复刷新
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
@@ -98,7 +98,7 @@ class QueueManager {
         try {
             const response = await fetch('/queue_state');
             const queueState = await response.json();
-            
+
             if (queueState.success) {
                 this.updateQueueDisplay(queueState.items);
                 this.updateQueueBadge(queueState.items.length);
@@ -115,11 +115,11 @@ class QueueManager {
     updateConcurrentInfo(queueState) {
         const currentConcurrentEl = document.getElementById('currentConcurrent');
         const maxConcurrentEl = document.getElementById('maxConcurrent');
-        
+
         if (currentConcurrentEl && queueState.current_running_tasks !== undefined) {
             currentConcurrentEl.textContent = queueState.current_running_tasks;
         }
-        
+
         if (maxConcurrentEl && queueState.max_concurrent_tasks !== undefined) {
             maxConcurrentEl.textContent = queueState.max_concurrent_tasks;
         }
@@ -132,22 +132,22 @@ class QueueManager {
         try {
             const response = await fetch('/concurrent_settings');
             const settings = await response.json();
-            
+
             if (settings.success) {
                 const maxConcurrentInput = document.getElementById('maxConcurrentInput');
                 const modalCurrentRunning = document.getElementById('modalCurrentRunning');
                 const modalQueueWaiting = document.getElementById('modalQueueWaiting');
-                
+
                 if (maxConcurrentInput) {
                     maxConcurrentInput.value = settings.max_concurrent_tasks;
                     maxConcurrentInput.min = settings.min_concurrent_tasks;
                     maxConcurrentInput.max = settings.max_limit;
                 }
-                
+
                 if (modalCurrentRunning) {
                     modalCurrentRunning.textContent = settings.current_running_tasks;
                 }
-                
+
                 // 计算等待中的任务数
                 const queueResponse = await fetch('/queue_state');
                 const queueState = await queueResponse.json();
@@ -168,12 +168,12 @@ class QueueManager {
         try {
             const maxConcurrentInput = document.getElementById('maxConcurrentInput');
             const maxConcurrentTasks = parseInt(maxConcurrentInput.value);
-            
+
             if (isNaN(maxConcurrentTasks) || maxConcurrentTasks < 1 || maxConcurrentTasks > 20) {
                 alert('请输入有效的并发任务数（1-20）');
                 return;
             }
-            
+
             const response = await fetch('/concurrent_settings', {
                 method: 'POST',
                 headers: {
@@ -183,19 +183,19 @@ class QueueManager {
                     max_concurrent_tasks: maxConcurrentTasks
                 })
             });
-            
+
             const result = await response.json();
-            
+
             if (result.success) {
                 // 关闭模态框
                 const modal = bootstrap.Modal.getInstance(document.getElementById('concurrentSettingsModal'));
                 if (modal) {
                     modal.hide();
                 }
-                
+
                 // 刷新队列状态
                 this.loadQueueState();
-                
+
                 // 显示成功消息
                 this.showMessage('并发设置已保存', 'success');
             } else {
@@ -219,9 +219,9 @@ class QueueManager {
             ${message}
             <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
         `;
-        
+
         document.body.appendChild(alertDiv);
-        
+
         // 3秒后自动移除
         setTimeout(() => {
             if (alertDiv.parentNode) {
@@ -236,19 +236,19 @@ class QueueManager {
     updateQueueDisplay(items) {
         const queueItemsContainer = document.getElementById('queueItems');
         const queueInfo = document.getElementById('queueInfo');
-        
+
         if (!queueItemsContainer) return;
-        
+
         // 清空现有项目
         queueItemsContainer.innerHTML = '';
-        
+
         if (items.length === 0) {
             // 显示空闲标签
             if (queueInfo) {
                 queueInfo.style.display = 'block';
                 queueInfo.innerHTML = '<span class="badge bg-success"><i class="fas fa-check-circle"></i> 空闲</span>';
             }
-            
+
             queueItemsContainer.innerHTML = `
                 <div class="text-center py-4">
                     <i class="fas fa-inbox fa-2x text-muted mb-2"></i>
@@ -257,12 +257,12 @@ class QueueManager {
             `;
             return;
         }
-        
+
         // 有任务时隐藏空闲标签
         if (queueInfo) {
             queueInfo.style.display = 'none';
         }
-        
+
         // 添加每个项目（包括排队和处理中的任务）
         items.forEach(item => {
             const itemElement = this.createQueueItemElement(item);
@@ -276,7 +276,7 @@ class QueueManager {
     createQueueItemElement(item) {
         const itemDiv = document.createElement('div');
         itemDiv.className = 'queue-item card mb-2';
-        
+
         // 使用filename字段或从files数组中提取文件名
         let displayName = '未知文件';
         if (item.filename) {
@@ -286,7 +286,7 @@ class QueueManager {
             const fileName = item.files[0].split('/').pop().split('\\').pop();
             displayName = fileName;
         }
-        
+
         // 获取语言显示名称
         const languageMap = {
             'zh': '中文', 'en': '英语', 'ja': '日语', 'ko': '韩语',
@@ -294,7 +294,7 @@ class QueueManager {
             'ar': '阿拉伯语', 'pt': '葡萄牙语'
         };
         const languageDisplay = languageMap[item.language] || item.language || '自动检测';
-        
+
         // 计算转录时间
         let transcriptionTime = '';
         if (item.start_time && item.end_time) {
@@ -312,7 +312,7 @@ class QueueManager {
             const seconds = duration % 60;
             transcriptionTime = `${minutes}分${seconds}秒`;
         }
-        
+
         itemDiv.innerHTML = `
             <div class="card-body p-3">
                 <div class="d-flex justify-content-between align-items-center mb-2">
@@ -433,6 +433,7 @@ class QueueManager {
      * 更新任务状态
      */
     updateTaskStatus(taskData) {
+        statusLogger.system('***【updateTaskStatus】更新本地队列状态 ***');
         // 更新本地队列状态
         const index = this.queueItems.findIndex(item => item.id === taskData.id);
         if (index !== -1) {
@@ -440,52 +441,47 @@ class QueueManager {
         } else {
             this.queueItems.push(taskData);
         }
-        
+
         // 记录任务状态变化
         switch (taskData.status) {
             case 'pending':
-                statusLogger.system('转录任务已加入队列', { task_id: taskData.id, files: taskData.files });
+                statusLogger.system('【updateTaskStatus】转录任务已加入队列', { task_id: taskData.id, files: taskData.files });
                 break;
             case 'loading':
-                statusLogger.info('正在加载模型', { task_id: taskData.id, model: taskData.model, message: taskData.message });
+                statusLogger.info('【updateTaskStatus】正在加载模型', { task_id: taskData.id, model: taskData.model, message: taskData.message });
                 break;
             case 'processing':
-                statusLogger.system('转录任务开始处理', { task_id: taskData.id, files: taskData.files });
+                statusLogger.system('【updateTaskStatus】转录任务开始处理', { task_id: taskData.id, files: taskData.files });
                 break;
             case 'completed':
-                statusLogger.success('转录任务完成', { task_id: taskData.id, files: taskData.files });
+                statusLogger.success('【updateTaskStatus】转录任务完成', { task_id: taskData.id, files: taskData.files });
                 // 转录完成后自动刷新输出文件列表
                 if (window.fileManager) {
-                    statusLogger.system('开始自动刷新输出文件列表');
-                    // 使用async/await确保异步操作正确执行
-                    (async () => {
-                        try {
-                            await window.fileManager.refreshFileList('output');
-                            statusLogger.system('输出文件列表自动刷新完成');
-                        } catch (error) {
-                            statusLogger.error('自动刷新输出文件列表失败', { error: error.message });
-                        }
-                    })();
+                    statusLogger.system('【updateTaskStatus】开始自动刷新输出文件列表');
+                    // 直接调用已验证有效的刷新方法
+                    window.fileManager.refreshFileList('output');
+                    statusLogger.system('【updateTaskStatus】输出文件列表自动刷新完成');
                 } else {
-                    statusLogger.error('FileManager未找到，无法自动刷新输出文件列表');
+                    statusLogger.error('【updateTaskStatus】FileManager未找到，无法自动刷新输出文件列表');
                 }
                 break;
+
             case 'failed':
-                statusLogger.error('转录任务失败', { task_id: taskData.id, error: taskData.error });
+                statusLogger.error('【updateTaskStatus】转录任务失败', { task_id: taskData.id, error: taskData.error });
                 break;
         }
-        
+
         // 立即更新显示
         this.updateQueueDisplay(this.queueItems);
         this.updateQueueBadge(this.queueItems.length);
-        
+
         // 如果任务完成或失败，5秒后从本地列表中移除
         if (taskData.status === 'completed' || taskData.status === 'failed') {
             setTimeout(() => {
                 this.removeTaskFromLocalList(taskData.id);
             }, 5000);
         }
-        
+
         // 同时从服务器刷新最新状态，确保数据同步
         this.loadQueueState();
     }
@@ -507,7 +503,7 @@ class QueueManager {
      */
     updateDownloadProgress(progressData) {
         const existingIndex = this.queueItems.findIndex(item => item.task_id === progressData.task_id);
-        
+
         if (existingIndex !== -1) {
             // 更新任务的下载进度信息
             this.queueItems[existingIndex] = {
@@ -516,7 +512,7 @@ class QueueManager {
                 download_message: progressData.message,
                 updated_at: new Date().toISOString()
             };
-            
+
             // 更新显示
             this.updateQueueDisplay(this.queueItems);
         }

@@ -319,6 +319,10 @@ class OptimizedWhisperSystem:
             del model
             if device.startswith('cuda'):
                 torch.cuda.empty_cache()
+                
+            # 确保WebSocket心跳正常
+            import time
+            time.sleep(0.2)  # 增加休眠时间，给WebSocket更多响应机会
             
             return results
         except Exception as e:
