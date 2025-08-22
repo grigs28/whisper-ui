@@ -39,6 +39,11 @@ test_*.py
 test_results/
 test_outputs/
 
+# Documentation directory (exclude from git)
+docs/
+docs_*.md
+*_docs.md
+
 # Environment variables
 .env
 .env.local
