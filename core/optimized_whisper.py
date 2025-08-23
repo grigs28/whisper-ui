@@ -623,6 +623,22 @@ class OptimizedWhisperSystem:
                 else:
                     logger.info(f"[PROCESSOR] 模型文件已存在且有效: {model_file} ({file_size} bytes)")
             
+            # 记录加载前的显存状态
+            gpu_id = 0  # 默认GPU ID
+            if device.startswith('cuda'):
+                gpu_id = int(device.split(':')[-1]) if ':' in device else 0
+            
+            # 获取预估显存
+            estimated_memory = self.memory_pool.estimate_memory_requirement(model_name)
+            
+            # 记录加载前显存
+            pre_load_memory = 0
+            if device.startswith('cuda'):
+                try:
+                    pre_load_memory = torch.cuda.memory_allocated(gpu_id) / (1024**3)  # 转换为GB
+                except Exception as e:
+                    logger.warning(f"[PROCESSOR] 获取加载前显存失败: {e}")
+            
             # 只有在确实需要下载时才显示下载提示框
             if model_needs_download:
                 logger.info(f"[PROCESSOR] 模型 {model_name} 需要下载，开始下载...")
@@ -646,6 +662,33 @@ class OptimizedWhisperSystem:
                 # 模型已存在，直接加载
                 logger.info(f"[PROCESSOR] 模型 {model_name} 已存在，直接加载...")
                 model = whisper.load_model(model_name, device=device, download_root=config.MODEL_BASE_PATH)
+            
+            # 记录加载后的显存状态
+            post_load_memory = 0
+            if device.startswith('cuda'):
+                try:
+                    post_load_memory = torch.cuda.memory_allocated(gpu_id) / (1024**3)  # 转换为GB
+                except Exception as e:
+                    logger.warning(f"[PROCESSOR] 获取加载后显存失败: {e}")
+            
+            # 计算实际使用的显存
+            actual_memory_usage = post_load_memory - pre_load_memory
+            if actual_memory_usage < 0:
+                actual_memory_usage = 0  # 避免负值
+            
+            # 记录显存使用情况
+            try:
+                self.memory_pool.record_actual_memory_usage(
+                    gpu_id=gpu_id,
+                    model_name=model_name,
+                    estimated_memory=estimated_memory,
+                    actual_memory=actual_memory_usage,
+                    task_id=task_id,
+                    success=True
+                )
+                logger.info(f"[PROCESSOR] 记录模型显存使用: {model_name} 预估{estimated_memory:.2f}GB 实际{actual_memory_usage:.2f}GB")
+            except Exception as record_error:
+                logger.error(f"[PROCESSOR] 记录显存使用失败: {record_error}")
             
             logger.info(f"[PROCESSOR] 成功加载模型 {model_name} 到 {device}")
             return model

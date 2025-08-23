@@ -1,0 +1,78 @@
+{
+  "last_updated": "2025-08-23T12:39:42.275615",
+  "total_records": 6,
+  "records": [
+    {
+      "timestamp": 1755922569.9603708,
+      "gpu_id": 0,
+      "model_name": "test_global",
+      "estimated_memory": 3.0,
+      "actual_memory": 2.9,
+      "difference": -0.10000000000000009,
+      "audio_duration": 90.0,
+      "task_id": "global_test_task",
+      "success": true,
+      "calibration_factor": 0.9666666666666667
+    },
+    {
+      "timestamp": 1755922573.5157225,
+      "gpu_id": 0,
+      "model_name": "test_global",
+      "estimated_memory": 3.0,
+      "actual_memory": 2.9,
+      "difference": -0.10000000000000009,
+      "audio_duration": 90.0,
+      "task_id": "global_test_task",
+      "success": true,
+      "calibration_factor": 0.9666666666666667
+    },
+    {
+      "timestamp": 1755922992.0923266,
+      "gpu_id": 0,
+      "model_name": "test_global",
+      "estimated_memory": 3.0,
+      "actual_memory": 2.9,
+      "difference": -0.10000000000000009,
+      "audio_duration": 90.0,
+      "task_id": "global_test_task",
+      "success": true,
+      "calibration_factor": 0.9666666666666667
+    },
+    {
+      "timestamp": 1755923004.6838295,
+      "gpu_id": 0,
+      "model_name": "test_global",
+      "estimated_memory": 3.0,
+      "actual_memory": 2.9,
+      "difference": -0.10000000000000009,
+      "audio_duration": 90.0,
+      "task_id": "global_test_task",
+      "success": true,
+      "calibration_factor": 0.9666666666666667
+    },
+    {
+      "timestamp": 1755923906.2647967,
+      "gpu_id": 2,
+      "model_name": "small",
+      "estimated_memory": 2.0,
+      "actual_memory": 0.902857780456543,
+      "difference": -1.097142219543457,
+      "audio_duration": null,
+      "task_id": "eee82a42-6568-464a-926c-9721f5e1bb9b",
+      "success": true,
+      "calibration_factor": 0.4514288902282715
+    },
+    {
+      "timestamp": 1755923982.2755122,
+      "gpu_id": 2,
+      "model_name": "small",
+      "estimated_memory": 2.0,
+      "actual_memory": 0.902857780456543,
+      "difference": -1.097142219543457,
+      "audio_duration": null,
+      "task_id": "547f51aa-b0fb-40e2-9161-5dc7b5d5da51",
+      "success": true,
+      "calibration_factor": 0.4514288902282715
+    }
+  ]
+}

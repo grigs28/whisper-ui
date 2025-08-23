@@ -727,6 +727,50 @@ def get_config():
             'log_level': 'INFO'
         }), 500
 
+@app.route('/memory_statistics')
+def get_memory_statistics():
+    """获取显存使用统计信息"""
+    try:
+        if optimized_whisper_system and hasattr(optimized_whisper_system, 'memory_pool'):
+            # 获取所有统计信息
+            all_stats = optimized_whisper_system.memory_pool.get_memory_statistics()
+            accuracy_analysis = optimized_whisper_system.memory_pool.get_accuracy_analysis()
+            recent_records = optimized_whisper_system.memory_pool.get_recent_memory_records(20)
+            
+            return jsonify({
+                'success': True,
+                'statistics': all_stats,
+                'accuracy_analysis': accuracy_analysis,
+                'recent_records': recent_records,
+                'total_records': len(recent_records)
+            })
+        else:
+            return jsonify({'success': False, 'error': '显存管理器未初始化'}), 500
+    except Exception as e:
+        logger.error(f"获取显存统计信息失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/memory_statistics/<model_name>')
+def get_model_memory_statistics(model_name):
+    """获取指定模型的显存使用统计信息"""
+    try:
+        if optimized_whisper_system and hasattr(optimized_whisper_system, 'memory_pool'):
+            # 获取指定模型的统计信息
+            model_stats = optimized_whisper_system.memory_pool.get_memory_statistics(model_name)
+            calibration_factor = optimized_whisper_system.memory_pool.get_calibration_factor(model_name)
+            
+            return jsonify({
+                'success': True,
+                'model_name': model_name,
+                'statistics': model_stats,
+                'calibration_factor': calibration_factor
+            })
+        else:
+            return jsonify({'success': False, 'error': '显存管理器未初始化'}), 500
+    except Exception as e:
+        logger.error(f"获取模型{model_name}显存统计信息失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/test')
 def test_page():
     """测试页面"""

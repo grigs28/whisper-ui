@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from config import config
 from utils.logger import logger
 
+# 导入显存记录器
+from core.memory_recorder import memory_recorder
+
 
 class MemoryEstimationPool:
     """显存预估池管理器"""
@@ -227,11 +230,16 @@ class MemoryEstimationPool:
                 gpu_id = task['allocated_gpu']
                 memory_size = task['allocated_memory']
                 
-                logger.info(f"[MEMORY] 开始释放任务 {task.get('id', 'unknown')} 在GPU{gpu_id}的显存 {memory_size:.2f}GB")
+                # 处理memory_size为None的情况
+                if memory_size is not None:
+                    logger.info(f"[MEMORY] 开始释放任务 {task.get('id', 'unknown')} 在GPU{gpu_id}的显存 {memory_size:.2f}GB")
+                else:
+                    logger.info(f"[MEMORY] 开始释放任务 {task.get('id', 'unknown')} 在GPU{gpu_id}的显存 (大小未知)")
                 
                 if gpu_id in self.gpu_pools:
                     try:
-                        self.gpu_pools[gpu_id].release(memory_size)
+                        if memory_size is not None:
+                            self.gpu_pools[gpu_id].release(memory_size)
                         logger.info(f"[MEMORY] 任务 {task.get('id', 'unknown')} 显存释放成功")
                     except Exception as pool_error:
                         logger.error(f"[MEMORY] GPU{gpu_id}显存池释放失败: {pool_error}", exc_info=True)
@@ -299,6 +307,29 @@ class MemoryEstimationPool:
         except Exception as e:
             logger.error(f"获取默认显存预估失败: {e}", exc_info=True)
             return 5.0
+
+    def estimate_memory_requirement(self, model_name: str, task: Dict[str, Any] = None) -> float:
+        """预估模型显存需求"""
+        try:
+            # 获取基础预估
+            base_estimation = self._get_default_estimation(model_name)
+            
+            # 如果有任务信息，计算时长因子
+            if task:
+                duration_factor = self._calculate_duration_factor(task)
+                # 应用时长因子和置信因子
+                final_estimation = base_estimation * duration_factor * self.confidence_factor
+            else:
+                # 只应用置信因子
+                final_estimation = base_estimation * self.confidence_factor
+            
+            logger.debug(f"显存预估: 模型{model_name} 基础{base_estimation:.2f}GB 最终{final_estimation:.2f}GB")
+            return final_estimation
+            
+        except Exception as e:
+            logger.error(f"预估模型{model_name}显存需求失败: {e}", exc_info=True)
+            # 返回默认预估作为备选
+            return self._get_default_estimation(model_name)
     
     def get_gpu_status(self) -> Dict[int, Dict[str, float]]:
         """获取所有GPU状态"""
@@ -386,3 +417,89 @@ class MemoryEstimationPool:
             logger.info("[MEMORY] 内存管理器资源清理完成")
         except Exception as e:
             logger.error(f"[MEMORY] 清理内存管理器资源失败: {e}", exc_info=True)
+
+    def record_actual_memory_usage(self, gpu_id: int, model_name: str, 
+                                 estimated_memory: float, actual_memory: float,
+                                 audio_duration: Optional[float] = None,
+                                 task_id: Optional[str] = None, success: bool = True):
+        """记录实际显存使用情况"""
+        try:
+            # 记录到显存记录器
+            memory_recorder.record_memory_usage(
+                gpu_id=gpu_id,
+                model_name=model_name,
+                estimated_memory=estimated_memory,
+                actual_memory=actual_memory,
+                audio_duration=audio_duration,
+                task_id=task_id,
+                success=success
+            )
+            
+            # 更新校准数据
+            self.calibrate_model_memory(gpu_id, model_name, actual_memory)
+            
+            logger.info(f"[MEMORY] 记录显存使用: GPU{gpu_id} 模型{model_name} "
+                       f"预估{estimated_memory:.2f}GB 实际{actual_memory:.2f}GB "
+                       f"差异{actual_memory - estimated_memory:+.2f}GB")
+            
+        except Exception as e:
+            logger.error(f"[MEMORY] 记录实际显存使用失败: {e}", exc_info=True)
+
+    def get_memory_statistics(self, model_name: str = None, gpu_id: int = None) -> Dict:
+        """获取显存使用统计信息"""
+        try:
+            if model_name:
+                return memory_recorder.get_model_statistics(model_name, gpu_id)
+            else:
+                return memory_recorder.get_all_statistics()
+        except Exception as e:
+            logger.error(f"[MEMORY] 获取显存统计信息失败: {e}", exc_info=True)
+            return {}
+
+    def get_calibration_factor(self, model_name: str, gpu_id: int = 0) -> float:
+        """获取模型的校准因子"""
+        try:
+            return memory_recorder.get_calibration_factor(model_name, gpu_id)
+        except Exception as e:
+            logger.error(f"[MEMORY] 获取校准因子失败: {e}", exc_info=True)
+            return 1.0
+
+    def estimate_memory_with_calibration(self, model_name: str, gpu_id: int = 0, 
+                                       task: Dict[str, Any] = None) -> float:
+        """使用校准因子进行显存预估"""
+        try:
+            # 获取基础预估
+            base_estimation = self.estimate_memory_requirement(model_name, task)
+            
+            # 获取校准因子
+            calibration_factor = self.get_calibration_factor(model_name, gpu_id)
+            
+            # 应用校准因子
+            calibrated_estimation = base_estimation * calibration_factor
+            
+            logger.info(f"[MEMORY] 校准显存预估: 模型{model_name} GPU{gpu_id} "
+                       f"基础预估{base_estimation:.2f}GB 校准因子{calibration_factor:.3f} "
+                       f"校准后预估{calibrated_estimation:.2f}GB")
+            
+            return calibrated_estimation
+            
+        except Exception as e:
+            logger.error(f"[MEMORY] 校准显存预估失败: {e}", exc_info=True)
+            # 返回基础预估作为备选
+            return self.estimate_memory_requirement(model_name, task)
+
+    def get_accuracy_analysis(self) -> Dict:
+        """获取预估准确性分析"""
+        try:
+            return memory_recorder.get_accuracy_analysis()
+        except Exception as e:
+            logger.error(f"[MEMORY] 获取准确性分析失败: {e}", exc_info=True)
+            return {}
+
+    def get_recent_memory_records(self, limit: int = 50) -> List[Dict]:
+        """获取最近的显存使用记录"""
+        try:
+            return memory_recorder.get_recent_records(limit)
+        except Exception as e:
+            logger.error(f"[MEMORY] 获取最近记录失败: {e}", exc_info=True)
+            return []
