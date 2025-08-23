@@ -12,13 +12,24 @@ class StatusLogger {
         this.logs = [];
         this.maxLogs = 1000;
         this.isCollapsed = true; // 默认折叠状态
+        this.enableConsoleLog = true; // 默认启用控制台日志
+        this.init();
     }
 
     /**
      * 初始化日志记录器
      */
-    init() {
-        // 初始化方法，目前为空，可扩展功能
+    async init() {
+        // 从服务器获取配置参数
+        try {
+            const response = await fetch('/api/config');
+            if (response.ok) {
+                const config = await response.json();
+                this.enableConsoleLog = config.enable_browser_console_log === true; // 只有明确为true时才启用
+            }
+        } catch (error) {
+            console.warn('无法获取日志配置，使用默认设置:', error);
+        }
         return this;
     }
 
@@ -271,6 +282,9 @@ class StatusLogger {
      * 输出到浏览器控制台
      */
     logToConsole(logEntry) {
+        if (!this.enableConsoleLog) {
+            return; // 如果禁用，则不输出到控制台
+        }
         const consoleMethod = this.getConsoleMethod(logEntry.level);
         const timestamp = logEntry.timestamp.toLocaleTimeString();
         const message = `[${timestamp}] [${logEntry.level.toUpperCase()}] ${logEntry.message}`;

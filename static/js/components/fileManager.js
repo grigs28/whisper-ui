@@ -372,7 +372,10 @@ class FileManager {
     async refreshFileList(type) {
         try {
             statusLogger.system(`开始刷新${type === 'uploaded' ? '上传' : '输出'}文件列表`);
-            console.log(`[FileManager] 开始刷新${type === 'uploaded' ? '上传' : '输出'}文件列表`);
+            // 替换为statusLogger调用
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.info(`[FileManager] 开始刷新${type === 'uploaded' ? '上传' : '输出'}文件列表`);
+            }
             
             // 根据类型获取对应的文件列表
             const response = await fetch(`/${type === 'uploaded' ? 'uploaded' : 'output'}_files`);
@@ -628,7 +631,10 @@ class FileManager {
             outputContainer.appendChild(tableContainer);
             
             statusLogger.system(`成功更新输出文件列表，共 ${files.length} 个文件`);
-            console.log(`[FileManager] 成功更新输出文件列表，共 ${files.length} 个文件`);
+            // 替换为statusLogger调用
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.info(`[FileManager] 成功更新输出文件列表，共 ${files.length} 个文件`);
+            }
             
             // 重新绑定全选复选框事件 - 增加安全检查
             setTimeout(() => {

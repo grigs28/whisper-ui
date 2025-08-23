@@ -19,6 +19,102 @@ class QueueManager {
         this.loadQueueState();
         this.startTimeUpdater();
         this.startPeriodicRefresh();
+        this.addCustomStyles();
+    }
+
+    /**
+     * 添加自定义样式
+     */
+    addCustomStyles() {
+        // 检查是否已经添加过样式
+        if (document.getElementById('queue-manager-styles')) {
+            return;
+        }
+
+        const style = document.createElement('style');
+        style.id = 'queue-manager-styles';
+        style.textContent = `
+            .queue-item {
+                transition: all 0.3s ease;
+                border: 1px solid #e9ecef;
+            }
+            
+            .queue-item:hover {
+                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+                transform: translateY(-1px);
+            }
+            
+            .queue-item .badge {
+                transition: all 0.2s ease;
+            }
+            
+            .queue-item .badge:hover {
+                transform: scale(1.05);
+            }
+            
+            .queue-item .transcription-time {
+                background: linear-gradient(45deg, #17a2b8, #138496) !important;
+                color: white !important;
+                font-weight: 500;
+            }
+            
+            .queue-item .processing-transcription {
+                background: linear-gradient(45deg, #dc3545, #c82333) !important;
+                color: white !important;
+                font-weight: 600;
+                animation: pulse 2s infinite;
+            }
+            
+            @keyframes pulse {
+                0% { opacity: 1; }
+                50% { opacity: 0.7; }
+                100% { opacity: 1; }
+            }
+            
+            .queue-item .processing-time {
+                background: linear-gradient(45deg, #ffc107, #e0a800) !important;
+                color: #212529 !important;
+                font-weight: 500;
+            }
+            
+            .queue-item .language-badge {
+                background: linear-gradient(45deg, #28a745, #20c997) !important;
+                color: white !important;
+                font-weight: 500;
+            }
+            
+            .queue-item .model-badge {
+                background: linear-gradient(45deg, #6c757d, #495057) !important;
+                color: white !important;
+                font-weight: 500;
+            }
+            
+            .queue-item .time-badge {
+                background: linear-gradient(45deg, #6c757d, #495057) !important;
+                color: white !important;
+                font-weight: 500;
+            }
+            
+            .queue-item .status-badge {
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+            
+            .queue-item .progress {
+                height: 8px;
+                border-radius: 4px;
+                background-color: #f8f9fa;
+                overflow: hidden;
+            }
+            
+            .queue-item .progress-bar {
+                background: linear-gradient(45deg, #007bff, #0056b3);
+                border-radius: 4px;
+                transition: width 0.3s ease;
+            }
+        `;
+        document.head.appendChild(style);
     }
 
     /**
@@ -33,13 +129,21 @@ class QueueManager {
      * 启动时间更新器
      */
     startTimeUpdater() {
+        // 启动时间更新定时器
+        this.startTimeUpdateTimer();
+        
+        // 添加实时时间更新定时器 - 每秒更新一次
+        this.realTimeUpdateInterval = setInterval(() => {
+            this.updateTimeDisplays();
+        }, 1000);
+        
         // 使用定时器管理器添加时间更新任务
         timerManager.addTask('queueTimeUpdate', () => {
             const hasProcessingTasks = this.queueItems.some(item => item.status === 'processing');
             if (hasProcessingTasks) {
                 this.updateQueueDisplay(this.queueItems);
             }
-        }, 0.5); // 每0.5个主周期执行一次(2.5秒)
+        }, 0.2); // 每0.2个主周期执行一次(1秒)
 
         // 确保定时器管理器已启动
         if (!timerManager.isRunning) {
@@ -53,16 +157,22 @@ class QueueManager {
     stopTimeUpdater() {
         // 从定时器管理器中移除任务
         timerManager.removeTask('queueTimeUpdate');
+        
+        // 停止实时时间更新定时器
+        if (this.realTimeUpdateInterval) {
+            clearInterval(this.realTimeUpdateInterval);
+            this.realTimeUpdateInterval = null;
+        }
     }
 
     /**
      * 启动定期刷新
      */
     startPeriodicRefresh() {
-        // 每5秒刷新一次队列状态
+        // 每2秒刷新一次队列状态，提高更新频率
         this.refreshInterval = setInterval(() => {
             this.loadQueueState();
-        }, 5000);
+        }, 2000);
 
         // 当页面失去焦点时停止刷新，获得焦点时恢复刷新
         document.addEventListener('visibilitychange', () => {
@@ -75,7 +185,7 @@ class QueueManager {
                 if (!this.refreshInterval) {
                     this.refreshInterval = setInterval(() => {
                         this.loadQueueState();
-                    }, 5000);
+                    }, 2000);
                 }
             }
         });
@@ -263,10 +373,35 @@ class QueueManager {
             queueInfo.style.display = 'none';
         }
 
+        // 对任务进行排序：处理中的任务优先显示
+        const sortedItems = this.sortQueueItems(items);
+
         // 添加每个项目（包括排队和处理中的任务）
-        items.forEach(item => {
+        sortedItems.forEach(item => {
             const itemElement = this.createQueueItemElement(item);
             queueItemsContainer.appendChild(itemElement);
+        });
+    }
+
+    /**
+     * 对队列项目进行排序
+     */
+    sortQueueItems(items) {
+        return [...items].sort((a, b) => {
+            // 处理中的任务优先
+            if (a.status === 'processing' && b.status !== 'processing') {
+                return -1;
+            }
+            if (a.status !== 'processing' && b.status === 'processing') {
+                return 1;
+            }
+            
+            // 同状态的任务按创建时间排序（新的在前）
+            if (a.created_at && b.created_at) {
+                return new Date(b.created_at) - new Date(a.created_at);
+            }
+            
+            return 0;
         });
     }
 
@@ -291,26 +426,75 @@ class QueueManager {
         const languageMap = {
             'zh': '中文', 'en': '英语', 'ja': '日语', 'ko': '韩语',
             'fr': '法语', 'de': '德语', 'es': '西班牙语', 'ru': '俄语',
-            'ar': '阿拉伯语', 'pt': '葡萄牙语'
+            'ar': '阿拉伯语', 'pt': '葡萄牙语', 'auto': '自动检测'
         };
-        const languageDisplay = languageMap[item.language] || item.language || '自动检测';
+        
+        // 如果语言是auto，尝试从结果中获取实际检测到的语言
+        let languageDisplay = languageMap[item.language] || '自动检测';
+        if (item.language === 'auto' && item.result && item.result.language) {
+            const detectedLanguage = languageMap[item.result.language] || item.result.language;
+            languageDisplay = detectedLanguage;
+        }
 
         // 计算转录时间
         let transcriptionTime = '';
+        if (typeof statusLogger !== 'undefined') {
+            statusLogger.debug('Task item for time calculation:', {
+                id: item.id,
+                status: item.status,
+                start_time: item.start_time,
+                created_at: item.created_at
+            });
+        }
+        
         if (item.start_time && item.end_time) {
+            // 任务已完成：显示总转录时间
             const startTime = new Date(item.start_time);
             const endTime = new Date(item.end_time);
             const duration = Math.round((endTime - startTime) / 1000);
             const minutes = Math.floor(duration / 60);
             const seconds = duration % 60;
             transcriptionTime = `${minutes}分${seconds}秒`;
-        } else if (item.start_time && item.status === 'processing') {
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.debug('Completed task transcription time:', transcriptionTime);
+            }
+        } else if (item.start_time && (item.status === 'processing' || item.status === 'loading')) {
+            // 任务处理中：显示当前转录时间
             const startTime = new Date(item.start_time);
             const now = new Date();
             const duration = Math.round((now - startTime) / 1000);
             const minutes = Math.floor(duration / 60);
             const seconds = duration % 60;
             transcriptionTime = `${minutes}分${seconds}秒`;
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.debug('Processing task transcription time:', transcriptionTime);
+            }
+        } else {
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.debug('No transcription time calculated - missing start_time or wrong status');
+            }
+        }
+
+        // 格式化时间显示
+        let timeDisplay = '';
+        
+        if (item.created_at) {
+            const createdTime = new Date(item.created_at);
+            const now = new Date();
+            const timeDiff = now - createdTime;
+            
+            if (timeDiff < 60000) { // 小于1分钟
+                timeDisplay = '刚刚';
+            } else if (timeDiff < 3600000) { // 小于1小时
+                const minutes = Math.floor(timeDiff / 60000);
+                timeDisplay = `${minutes}分钟前`;
+            } else if (timeDiff < 86400000) { // 小于1天
+                const hours = Math.floor(timeDiff / 3600000);
+                timeDisplay = `${hours}小时前`;
+            } else {
+                const days = Math.floor(timeDiff / 86400000);
+                timeDisplay = `${days}天前`;
+            }
         }
 
         itemDiv.innerHTML = `
@@ -321,50 +505,73 @@ class QueueManager {
                             <i class="fas fa-file-audio text-primary me-1"></i>
                             ${displayName}
                         </h6>
-                        <div class="d-flex align-items-center text-muted small">
-                            <span class="me-3">
-                                <i class="fas fa-brain me-1"></i>
-                                ${item.model || 'base'}
+                        <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
+                            <span class="badge model-badge" style="font-size: 0.75rem; padding: 0.25rem 0.5rem; display: inline-flex; align-items: center;">
+                                <i class="fas fa-brain me-1" style="display: inline-block; width: 14px; text-align: center;"></i>
+                                <span>${item.model || 'base'}</span>
                             </span>
-                            <span class="me-3">
-                                <i class="fas fa-language me-1"></i>
-                                ${languageDisplay}
+                            <span class="badge language-badge" style="font-size: 0.75rem; padding: 0.25rem 0.5rem; display: inline-flex; align-items: center;">
+                                <i class="fas fa-language me-1" style="display: inline-block; width: 14px; text-align: center;"></i>
+                                <span>${languageDisplay}</span>
                             </span>
+                            ${item.created_at ? `
+                            <span class="badge bg-light text-dark border" style="font-size: 0.7rem; padding: 0.2rem 0.4rem; display: inline-flex; align-items: center;" title="${new Date(item.created_at).toLocaleString()}">
+                                <i class="fas fa-calendar-alt me-1 text-muted" style="display: inline-block; width: 14px; text-align: center;"></i>
+                                <span>${new Date(item.created_at).toLocaleTimeString()}</span>
+                            </span>
+                            ` : ''}
                             ${transcriptionTime ? `
-                            <span>
-                                <i class="fas fa-stopwatch me-1"></i>
-                                ${transcriptionTime}
+                            <span class="badge transcription-time ${item.status === 'processing' ? 'processing-transcription' : ''}" 
+                                  style="font-size: 0.75rem; padding: 0.25rem 0.5rem; background-color: #dc3545; color: white; display: inline-flex; align-items: center;"
+                                  data-transcription-time="${item.start_time}"
+                                  data-task-status="${item.status}">
+                                <i class="fas fa-stopwatch me-1" style="display: inline-block; width: 14px; text-align: center;"></i>
+                                <span>${transcriptionTime}</span>
+                                ${item.status === 'processing' ? ' <span>(进行中)</span>' : ''}
+                            </span>
+                            ` : ''}
+                            ${timeDisplay ? `
+                            <span class="badge time-badge" style="font-size: 0.75rem; padding: 0.25rem 0.5rem; display: inline-flex; align-items: center;">
+                                <i class="fas fa-clock me-1" style="display: inline-block; width: 14px; text-align: center;"></i>
+                                <span data-time-timestamp="${item.created_at}">${timeDisplay}</span>
                             </span>
                             ` : ''}
                         </div>
                     </div>
                     <div class="d-flex align-items-center">
-                        <span class="badge bg-${this.getStatusBadgeClass(item.status)} me-2">
+                        <span class="badge bg-${this.getStatusBadgeClass(item.status)} status-badge" style="font-size: 0.8rem; padding: 0.3rem 0.6rem;">
                             ${this.getStatusText(item.status)}
                         </span>
                     </div>
                 </div>
                 ${item.status === 'processing' ? `
-                <div class="progress mb-1" style="height: 8px;">
+                <div class="progress mb-2" style="height: 10px; border-radius: 5px; background-color: #f8f9fa;">
                     <div class="progress-bar progress-bar-striped progress-bar-animated" 
                          role="progressbar" 
-                         style="width: ${item.progress || 0}%"
+                         style="width: ${item.progress || 0}%; background: linear-gradient(45deg, #007bff, #0056b3); border-radius: 5px; transition: width 0.3s ease;"
                          aria-valuenow="${item.progress || 0}" 
                          aria-valuemin="0" 
                          aria-valuemax="100">
                     </div>
                 </div>
-                <div class="d-flex justify-content-between align-items-center">
-                    <small class="text-muted">${item.download_message || item.message || '处理中...'}</small>
-                    <small class="text-muted">${item.download_progress || item.progress || 0}%</small>
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                    <small class="text-muted fw-medium">
+                        <i class="fas fa-cog fa-spin me-1"></i>
+                        ${item.message || '处理中...'}
+                    </small>
+                    <small class="text-primary fw-bold">${Math.round(item.progress || 0)}%</small>
                 </div>
                 ` : ''}
                 ${item.download_progress && item.status === 'processing' ? `
-                <div class="mt-2">
-                    <div class="progress mb-1" style="height: 6px;">
-                        <div class="progress-bar bg-info" 
+                <div class="mt-2 p-2 bg-light rounded">
+                    <div class="d-flex align-items-center mb-1">
+                        <i class="fas fa-download text-info me-2"></i>
+                        <small class="text-info fw-medium">模型下载进度</small>
+                    </div>
+                    <div class="progress mb-1" style="height: 8px; border-radius: 4px; background-color: #e9ecef;">
+                        <div class="progress-bar bg-info progress-bar-striped progress-bar-animated" 
                              role="progressbar" 
-                             style="width: ${item.download_progress}%"
+                             style="width: ${item.download_progress}%; border-radius: 4px; transition: width 0.3s ease;"
                              aria-valuenow="${item.download_progress}" 
                              aria-valuemin="0" 
                              aria-valuemax="100">
@@ -434,10 +641,16 @@ class QueueManager {
      */
     updateTaskStatus(taskData) {
         statusLogger.system('***【updateTaskStatus】更新本地队列状态 ***');
+        
         // 更新本地队列状态
         const index = this.queueItems.findIndex(item => item.id === taskData.id);
         if (index !== -1) {
-            this.queueItems[index] = { ...this.queueItems[index], ...taskData };
+            // 如果是进度更新，使用平滑过渡
+            if (taskData.type === 'progress_update' && this.queueItems[index].progress !== taskData.progress) {
+                this.smoothProgressUpdate(this.queueItems[index], taskData);
+            } else {
+                this.queueItems[index] = { ...this.queueItems[index], ...taskData };
+            }
         } else {
             this.queueItems.push(taskData);
         }
@@ -484,6 +697,150 @@ class QueueManager {
 
         // 同时从服务器刷新最新状态，确保数据同步
         this.loadQueueState();
+    }
+
+    /**
+     * 平滑进度更新
+     */
+    smoothProgressUpdate(taskItem, newData) {
+        const oldProgress = taskItem.progress || 0;
+        const newProgress = newData.progress || 0;
+        
+        // 如果进度变化很小，直接更新
+        if (Math.abs(newProgress - oldProgress) < 2) {
+            Object.assign(taskItem, newData);
+            return;
+        }
+        
+        // 平滑过渡动画
+        const duration = 500; // 500ms过渡时间
+        const startTime = Date.now();
+        const startProgress = oldProgress;
+        const progressDiff = newProgress - oldProgress;
+        
+        const animate = () => {
+            const elapsed = Date.now() - startTime;
+            const progress = Math.min(elapsed / duration, 1);
+            
+            // 使用缓动函数
+            const easeProgress = this.easeInOutQuad(progress);
+            const currentProgress = startProgress + (progressDiff * easeProgress);
+            
+            taskItem.progress = Math.round(currentProgress * 10) / 10;
+            
+            if (progress < 1) {
+                requestAnimationFrame(animate);
+            } else {
+                // 动画完成，设置最终值
+                Object.assign(taskItem, newData);
+            }
+            
+            // 更新显示
+            this.updateQueueDisplay(this.queueItems);
+        };
+        
+        requestAnimationFrame(animate);
+    }
+
+    /**
+     * 缓动函数 - 二次方缓入缓出
+     */
+    easeInOutQuad(t) {
+        return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+    }
+
+    /**
+     * 格式化相对时间
+     */
+    formatRelativeTime(timestamp) {
+        if (!timestamp) return '';
+        
+        const createdTime = new Date(timestamp);
+        const now = new Date();
+        const timeDiff = now - createdTime;
+        
+        if (timeDiff < 60000) { // 小于1分钟
+            return '刚刚';
+        } else if (timeDiff < 3600000) { // 小于1小时
+            const minutes = Math.floor(timeDiff / 60000);
+            return `${minutes}分钟前`;
+        } else if (timeDiff < 86400000) { // 小于1天
+            const hours = Math.floor(timeDiff / 3600000);
+            return `${hours}小时前`;
+        } else {
+            const days = Math.floor(timeDiff / 86400000);
+            return `${days}天前`;
+        }
+    }
+
+    /**
+     * 启动时间更新定时器
+     */
+    startTimeUpdateTimer() {
+        // 每分钟更新一次时间显示
+        setInterval(() => {
+            this.updateTimeDisplays();
+        }, 60000); // 60秒更新一次
+    }
+
+    /**
+     * 更新所有时间显示
+     */
+    updateTimeDisplays() {
+        const queueItemsContainer = document.getElementById('queueItems');
+        if (!queueItemsContainer) return;
+
+        // 更新所有任务卡片中的时间显示
+        const timeElements = queueItemsContainer.querySelectorAll('[data-time-timestamp]');
+        timeElements.forEach(element => {
+            const timestamp = element.getAttribute('data-time-timestamp');
+            if (timestamp) {
+                const relativeTime = this.formatRelativeTime(timestamp);
+                element.textContent = relativeTime;
+            }
+        });
+
+        // 更新处理时间显示
+        const processingTimeElements = queueItemsContainer.querySelectorAll('[data-processing-time]');
+        processingTimeElements.forEach(element => {
+            const startTime = element.getAttribute('data-processing-time');
+            if (startTime) {
+                const startDate = new Date(startTime);
+                const now = new Date();
+                const processingTime = Math.round((now - startDate) / 1000);
+                const minutes = Math.floor(processingTime / 60);
+                const seconds = processingTime % 60;
+                element.textContent = `${minutes}分${seconds}秒`;
+            }
+        });
+
+        // 更新转录时间显示 - 实时更新处理中任务的转录时间
+        const transcriptionTimeElements = queueItemsContainer.querySelectorAll('[data-transcription-time]');
+        transcriptionTimeElements.forEach(element => {
+            const startTime = element.getAttribute('data-transcription-time');
+            const status = element.getAttribute('data-task-status');
+            
+            if (startTime && (status === 'processing' || status === 'loading')) {
+                const startDate = new Date(startTime);
+                const now = new Date();
+                const transcriptionTime = Math.round((now - startDate) / 1000);
+                const minutes = Math.floor(transcriptionTime / 60);
+                const seconds = transcriptionTime % 60;
+                
+                // 查找时间文本的span元素，只更新文本内容，保留图标
+                const timeSpan = element.querySelector('span');
+                if (timeSpan) {
+                    timeSpan.textContent = `${minutes}分${seconds}秒`;
+                } else {
+                    // 如果没有找到span元素，则更新整个元素内容（包含图标）
+                    element.innerHTML = `
+                        <i class="fas fa-stopwatch me-1" style="display: inline-block; width: 14px; text-align: center;"></i>
+                        <span>${minutes}分${seconds}秒</span>
+                        ${status === 'processing' ? ' <span>(进行中)</span>' : ''}
+                    `;
+                }
+            }
+        });
     }
 
     /**

@@ -16,7 +16,8 @@ class MemoryEstimationPool:
         self.gpu_pools: Dict[int, 'GPUMemoryPool'] = {}  # {gpu_id: GPUMemoryPool}
         self.calibration_data = {}  # 校准数据
         self.segment_duration = int(os.getenv('SEGMENT_DURATION', 30))
-        self.confidence_factor = float(os.getenv('MEMORY_CONFIDENCE_FACTOR', 1.2))
+        # 使用配置文件中的MEMORY_CONFIDENCE_FACTOR参数
+        self.confidence_factor = float(os.getenv('MEMORY_CONFIDENCE_FACTOR', config.MEMORY_CONFIDENCE_FACTOR))
         self._sync_lock = threading.Lock()
     
     def initialize_gpu_pool(self, gpu_id: int):
@@ -250,7 +251,7 @@ class MemoryEstimationPool:
             logger.error(f"[MEMORY] 释放任务 {task.get('id', 'unknown')} 显存失败: {e}", exc_info=True)
         
     def _calculate_duration_factor(self, task: Dict[str, Any]) -> float:
-        """根据音频时长计算显存影响因子"""
+        """根据音频时长计算显存影响因子 - 改进版本"""
         try:
             # 简化实现，实际应该根据音频文件计算时长
             files = task.get('files', [])
@@ -264,8 +265,23 @@ class MemoryEstimationPool:
             if estimated_total_duration <= self.segment_duration:
                 return 1.0
             else:
-                # 超长音频需要更多显存用于缓存
-                return 1.0 + (estimated_total_duration / self.segment_duration - 1) * 0.3
+                # 改进的时长因子计算
+                segments = estimated_total_duration / self.segment_duration
+                
+                # 基础线性增长（考虑音频特征和中间激活）
+                base_factor = 1.0 + (segments - 1) * 0.25
+                
+                # 长音频额外缓冲（考虑注意力机制的平方复杂度影响）
+                if segments > 10:  # 超过5分钟
+                    extra_buffer = (segments - 10) * 0.08
+                    base_factor += extra_buffer
+                
+                # 超长音频额外缓冲（超过10分钟）
+                if segments > 20:  # 超过10分钟
+                    extra_buffer = (segments - 20) * 0.05
+                    base_factor += extra_buffer
+                
+                return base_factor
         except Exception as e:
             logger.error(f"计算任务 {task.get('id', 'unknown')} 时长因子失败: {e}", exc_info=True)
             return 1.0

@@ -65,12 +65,15 @@ class Task:
     created_at: datetime
     updated_at: datetime
     progress: float = 0.0
+    message: Optional[str] = None
     result: Optional[Any] = None
     error: Optional[str] = None
     retry_count: int = 0
     max_retries: int = 3
     allocated_memory: Optional[float] = None
     allocated_gpu: Optional[int] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
     
     def to_dict(self) -> Dict:
         return {
@@ -84,12 +87,15 @@ class Task:
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'progress': self.progress,
+            'message': self.message,
             'result': self.result,
             'error': self.error,
             'retry_count': self.retry_count,
             'max_retries': self.max_retries,
             'allocated_memory': self.allocated_memory,
-            'allocated_gpu': self.allocated_gpu
+            'allocated_gpu': self.allocated_gpu,
+            'start_time': self.start_time.isoformat() if self.start_time else None,
+            'end_time': self.end_time.isoformat() if self.end_time else None
         }
 
 
@@ -178,6 +184,7 @@ class IntelligentQueueManager:
                     del self._task_queue_mapping[task.id]
                     
                 task.status = TaskStatus.PROCESSING
+                task.start_time = datetime.now()  # 设置开始时间
                 task.updated_at = datetime.now()
                 self.processing_tasks[task.id] = task
                 self.current_tasks += 1
@@ -221,6 +228,7 @@ class IntelligentQueueManager:
                     task.status = TaskStatus.COMPLETED
                     task.result = result
                     task.progress = 100.0
+                    task.end_time = datetime.now()  # 设置结束时间
                     task.updated_at = datetime.now()
                 except Exception as e:
                     logger.error(f"[QUEUE] 更新任务 {task_id} 状态失败: {e}", exc_info=True)
@@ -371,17 +379,54 @@ class IntelligentQueueManager:
                 logger.error(f"[QUEUE] 重试任务失败: {e}", exc_info=True)
                 return False
             
-    def update_task_progress(self, task_id: str, progress: float):
-        """更新任务进度"""
+    def update_task_progress(self, task_id: str, progress: float, message: str = None):
+        """更新任务进度 - 支持平滑进度更新"""
         with self._lock:
             try:
                 task = self.processing_tasks.get(task_id)
                 if task:
-                    task.progress = progress
-                    task.updated_at = datetime.now()
-                    # 进度更新通常不触发状态变更通知以避免过多通知
+                    # 确保进度在有效范围内
+                    progress = max(0.0, min(100.0, progress))
+                    
+                                    # 只有当进度有显著变化时才更新（避免过多通知）
+                if abs(task.progress - progress) >= 0.5 or progress >= 100.0:
+                        task.progress = progress
+                        task.updated_at = datetime.now()
+                        
+                        # 如果有消息，更新任务消息
+                        if message:
+                            task.message = message
+                        
+                        # 发送进度更新通知
+                        self._notify_progress_update(task)
+                        
+                        logger.debug(f"[QUEUE] 任务 {task_id} 进度更新: {progress:.1f}%")
+                        
             except Exception as e:
                 logger.error(f"[QUEUE] 更新任务进度失败: {e}", exc_info=True)
+    
+    def _notify_progress_update(self, task: Task):
+        """通知任务进度更新"""
+        try:
+            # 构建进度更新消息
+            progress_data = {
+                'id': task.id,
+                'status': task.status.value,
+                'progress': task.progress,
+                'message': getattr(task, 'message', None),
+                'updated_at': task.updated_at.isoformat(),
+                'type': 'progress_update'
+            }
+            
+            # 通知所有状态回调
+            for callback in self.status_callbacks:
+                try:
+                    callback(progress_data)
+                except Exception as e:
+                    logger.error(f"[QUEUE] 进度更新回调执行失败: {e}", exc_info=True)
+                    
+        except Exception as e:
+            logger.error(f"[QUEUE] 通知进度更新失败: {e}", exc_info=True)
                 
     def get_queue_stats(self) -> Dict[str, Any]:
         """获取队列统计信息"""

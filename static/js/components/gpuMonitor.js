@@ -32,7 +32,10 @@ class GPUMonitor {
      * 初始化GPU监控
      */
     init() {
-        console.log('初始化GPU监控...');
+        // 替换为statusLogger调用
+        if (typeof statusLogger !== 'undefined') {
+            statusLogger.info('初始化GPU监控...');
+        }
 
         // 启动GPU监控
         this.startGPUMonitoring();
@@ -63,10 +66,17 @@ class GPUMonitor {
     startGPUMonitoring() {
         if (this.isMonitoring) {
             console.warn('GPU监控已在运行中');
+            // 替换为statusLogger调用
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.warning('GPU监控已在运行中');
+            }
             return;
         }
 
-        console.log('开始GPU监控...');
+        // 替换为statusLogger调用
+        if (typeof statusLogger !== 'undefined') {
+            statusLogger.info('开始GPU监控...');
+        }
         this.isMonitoring = true;
 
         // 立即获取一次GPU信息
@@ -101,6 +111,10 @@ class GPUMonitor {
             }
         } catch (error) {
             console.error('获取GPU信息时出错:', error);
+            // 替换为statusLogger调用
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.error('获取GPU信息时出错:', error);
+            }
 
             // 显示错误信息
             this.updateGPUInfoDisplay({
@@ -120,6 +134,10 @@ class GPUMonitor {
         // 检查元素是否存在
         if (!gpuCardsContainer) {
             console.warn('GPU状态显示容器未找到');
+            // 替换为statusLogger调用
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.warning('GPU状态显示容器未找到');
+            }
             return;
         }
 

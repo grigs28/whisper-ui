@@ -95,7 +95,7 @@
                             <label for="modelSelector" class="form-label">模型选择</label>
                             <select class="form-select" id="modelSelector">
                                 {% for model in whisper_models %}
-                                <option value="{{ model }}" {% if model=='turbo' %}selected{% endif %}>
+                                <option value="{{ model }}" {% if model==default_model %}selected{% endif %}>
                                     {{ model }}{% if model in model_memory_requirements %} ({{
                                     model_memory_requirements[model] }}){% endif %}
                                 </option>
@@ -499,7 +499,10 @@
                 try {
                     window.wsManager.socket.disconnect();
                 } catch (e) {
-                    console.log('WebSocket断开连接时出错:', e);
+                    // 替换为statusLogger调用
+                    if (typeof statusLogger !== 'undefined') {
+                        statusLogger.error('WebSocket断开连接时出错:', e);
+                    }
                 }
             }
         });
@@ -508,7 +511,10 @@
         window.addEventListener('load', function() {
             setTimeout(() => {
                 if (window.wsManager) {
-                    console.log('页面加载完成，WebSocket管理器已就绪');
+                    // 替换为statusLogger调用
+                    if (typeof statusLogger !== 'undefined') {
+                        statusLogger.info('页面加载完成，WebSocket管理器已就绪');
+                    }
                 }
             }, 1000);
         });
@@ -523,7 +529,10 @@
             const fileInput = document.getElementById('fileInput');
 
             if (!dropArea || !fileInput) {
-                console.error('拖拽区域或文件输入框未找到');
+                // 替换为statusLogger调用
+                if (typeof statusLogger !== 'undefined') {
+                    statusLogger.error('拖拽区域或文件输入框未找到');
+                }
                 return;
             }
 
@@ -563,7 +572,10 @@
                 handleFiles(files);
             });
 
-            console.log('拖拽上传功能已初始化');
+            // 替换为statusLogger调用
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.info('拖拽上传功能已初始化');
+            }
         }
 
         // 阻止默认行为
@@ -575,17 +587,29 @@
         // 处理文件上传
         function handleFiles(files) {
             if (files.length > 0 && window.fileManager) {
-                console.log('开始处理文件上传，文件数量:', files.length);
+                // 替换为statusLogger调用
+                if (typeof statusLogger !== 'undefined') {
+                    statusLogger.info('开始处理文件上传，文件数量:', files.length);
+                }
                 window.fileManager.handleFiles(files);
             } else if (!window.fileManager) {
-                console.error('FileManager未初始化，尝试等待初始化完成...');
+                // 替换为statusLogger调用
+                if (typeof statusLogger !== 'undefined') {
+                    statusLogger.error('FileManager未初始化，尝试等待初始化完成...');
+                }
                 // 等待fileManager初始化完成
                 setTimeout(() => {
                     if (window.fileManager) {
-                        console.log('FileManager已初始化，开始处理文件上传');
+                        // 替换为statusLogger调用
+                        if (typeof statusLogger !== 'undefined') {
+                            statusLogger.info('FileManager已初始化，开始处理文件上传');
+                        }
                         window.fileManager.handleFiles(files);
                     } else {
-                        console.error('FileManager仍未初始化，拖拽上传功能不可用');
+                        // 替换为statusLogger调用
+                        if (typeof statusLogger !== 'undefined') {
+                            statusLogger.error('FileManager仍未初始化，拖拽上传功能不可用');
+                        }
                         alert('文件管理器未初始化，请刷新页面重试');
                     }
                 }, 1000);

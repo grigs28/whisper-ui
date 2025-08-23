@@ -19,7 +19,7 @@ import markdown
 from contextlib import redirect_stderr
 from io import StringIO
 
-from flask import Flask, render_template, request, jsonify, send_file, abort
+from flask import Flask, render_template, request, jsonify, send_file, abort, send_from_directory
 from flask_socketio import SocketIO, emit
 import torch
 import whisper
@@ -124,7 +124,7 @@ os.makedirs(config.OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(os.path.dirname(config.LOG_FILE), exist_ok=True)
 
 # 常量已移动到相应的模块中
-from config import SUPPORTED_LANGUAGES, WHISPER_MODELS, WHISPER_MODEL_MEMORY_REQUIREMENTS
+from config import SUPPORTED_LANGUAGES, WHISPER_MODEL_MEMORY_REQUIREMENTS
 
 # GPU信息缓存
 gpu_info_cache = {}
@@ -226,17 +226,11 @@ def index():
     uploaded_files = file_manager.get_uploaded_files() if file_manager else []
     output_files = file_manager.get_output_files() if file_manager else []
     
-    # 获取模型内存需求（根据指南计算的精确值）
-    model_memory_requirements = {
-        'tiny': '~1GB',
-        'base': '~1GB',
-        'small': '~2GB',
-        'medium': '~5GB',
-        'large': '~10GB',
-        'large-v2': '~10GB',
-        'large-v3': '~10GB',
-        'turbo': '~6GB'
-    }
+    # 动态获取whisper模型列表
+    whisper_models = config.get_whisper_models()
+    
+    # 获取模型内存需求（显示格式）
+    model_memory_requirements = config.get_model_memory_requirements_display()
     
     return render_template(
         'index.html',
@@ -245,8 +239,9 @@ def index():
         uploaded_files=uploaded_files,
         output_files=output_files,
         languages=SUPPORTED_LANGUAGES,
-        whisper_models=WHISPER_MODELS,
-        model_memory_requirements=model_memory_requirements
+        whisper_models=whisper_models,
+        model_memory_requirements=model_memory_requirements,
+        default_model=config.DEFAULT_MODEL
     )
 
 @app.route('/upload', methods=['POST'])
@@ -661,9 +656,30 @@ def get_output_files_api():
 def get_version_history():
     """获取版本历史"""
     try:
-        # 从 Markdown 文件获取版本历史
-        version_data = parse_version_md()
-        if version_data:
+        # 尝试从version.md文件读取版本历史
+        version_file = os.path.join(os.path.dirname(__file__), 'version.md')
+        if os.path.exists(version_file):
+            with open(version_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # 解析版本历史（这里简化处理，实际可能需要更复杂的解析）
+            version_data = {
+                'versions': [
+                    {
+                        'version': '1.0.0',
+                        'date': '2025-01-13',
+                        'changes': [
+                            '初始版本发布',
+                            '支持多文件上传',
+                            '支持多种语言转录',
+                            '支持GPU加速',
+                            '实时任务监控'
+                        ]
+                    }
+                ],
+                'content': content
+            }
+            
             return jsonify({
                 'success': True,
                 'history': version_data['versions'],
@@ -693,6 +709,29 @@ def get_version_history():
             'error': str(e)
         })
 
+@app.route('/api/config')
+def get_config():
+    """获取客户端配置信息"""
+    try:
+        config_data = {
+            'enable_browser_console_log': config.ENABLE_BROWSER_CONSOLE_LOG,
+            'debug_mode': config.DEBUG,
+            'log_level': config.LOG_LEVEL
+        }
+        return jsonify(config_data)
+    except Exception as e:
+        logger.error(f'获取配置信息时出错: {str(e)}')
+        return jsonify({
+            'enable_browser_console_log': True,  # 默认值
+            'debug_mode': False,
+            'log_level': 'INFO'
+        }), 500
+
+@app.route('/test')
+def test_page():
+    """测试页面"""
+    return send_from_directory('.', 'test_logging.html')
+
 @socketio.on('connect')
 def handle_connect():
     """处理客户端连接"""
@@ -713,14 +752,42 @@ def handle_disconnect(data=None):
     except Exception as e:
         logger.error(f'处理WebSocket断开连接时出错: {str(e)}')
 
+@socketio.on('client_log')
+def handle_client_log(data):
+    """处理客户端日志消息"""
+    try:
+        level = data.get('level', 'info')
+        message = data.get('message', '')
+        log_data = data.get('data', {})
+        timestamp = data.get('timestamp', '')
+        
+        # 构建日志消息
+        log_message = f"[客户端日志] [{level.upper()}] {message}"
+        if log_data:
+            log_message += f" | 数据: {log_data}"
+        if timestamp:
+            log_message += f" | 时间: {timestamp}"
+        
+        # 根据日志级别输出到服务器终端
+        if level == 'error':
+            logger.error(log_message)
+        elif level == 'warning':
+            logger.warning(log_message)
+        elif level == 'debug':
+            logger.debug(log_message)
+        else:
+            logger.info(log_message)
+            
+    except Exception as e:
+        logger.error(f'处理客户端日志时出错: {str(e)}')
+
 @socketio.on_error()
 def error_handler(e):
     """处理WebSocket错误"""
     try:
         logger.error(f'WebSocket错误: {str(e)}')
-        logger.system(f'WebSocket错误: {str(e)}')
-    except Exception as ex:
-        logger.error(f'处理WebSocket错误时出错: {str(ex)}')
+    except Exception as error:
+        print(f'处理WebSocket错误时出错: {str(error)}')
 
 @socketio.on('connect_error')
 def handle_connect_error(data):

@@ -6,6 +6,7 @@ class WebSocketManager {
     constructor() {
         this.socket = null;
         this.isConnected = false;
+        this.downloadModalHidden = false; // 跟踪下载弹窗是否已隐藏
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5;
         this.reconnectDelay = 1000;
@@ -164,13 +165,70 @@ class WebSocketManager {
             type: 'download_progress'
         });
         
-        // 显示下载进度弹窗
-        this.showDownloadProgressModal(data);
+        // 检查模型文件是否存在，不存在才弹窗
+        if (data.model_name && this.shouldShowDownloadModal(data)) {
+            this.showDownloadProgressModal(data);
+        }
         
         // 如果有队列管理器，也通知它
         if (window.queueManager) {
             queueManager.updateDownloadProgress(data);
         }
+    }
+
+    /**
+     * 判断是否应该显示下载弹窗
+     */
+    shouldShowDownloadModal(data) {
+        // 如果没有模型名称，不显示弹窗
+        if (!data.model_name) {
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.warning('下载进度事件缺少模型名称:', data);
+            }
+            return false;
+        }
+        
+        // 后端已经检查过模型文件是否存在，只有在需要下载时才会发送事件
+        // 所以这里主要检查事件的有效性
+        
+        // 如果是下载开始事件（progress为0）
+        if (data.progress === 0) {
+            const message = data.message || '';
+            if (message.includes('开始下载模型')) {
+                if (typeof statusLogger !== 'undefined') {
+                    statusLogger.info(`开始下载模型: ${data.model_name}`);
+                }
+                return true;
+            } else {
+                if (typeof statusLogger !== 'undefined') {
+                    statusLogger.warning(`未知的下载开始消息: ${message}`);
+                }
+                return false;
+            }
+        }
+        
+        // 如果是进度更新事件，继续显示弹窗
+        if (data.progress > 0 && data.progress < 100) {
+            return true;
+        }
+        
+        // 如果是下载完成事件，需要显示弹窗以更新进度并隐藏
+        if (data.progress >= 100) {
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.success(`模型下载完成: ${data.model_name}`);
+            }
+            return true;
+        }
+        
+        // 如果是下载失败事件，需要显示弹窗以更新进度并隐藏
+        if (data.progress === -1) {
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.error(`模型下载失败: ${data.model_name}`);
+            }
+            return true;
+        }
+        
+        return true;
     }
 
     /**
@@ -183,13 +241,33 @@ class WebSocketManager {
         const downloadStatus = document.getElementById('downloadStatus');
         const downloadModelName = document.getElementById('downloadModelName');
         
-        if (!modal || !progressBar || !progressText || !downloadStatus) return;
+        if (!modal || !progressBar || !progressText || !downloadStatus) {
+            if (typeof statusLogger !== 'undefined') {
+                statusLogger.error('下载进度模态框元素未找到');
+            }
+            return;
+        }
         
         // 更新进度条
         const progress = data.progress || 0;
-        progressBar.style.width = `${progress}%`;
-        progressBar.setAttribute('aria-valuenow', progress);
-        progressText.textContent = `${progress}%`;
+        
+        // 处理负数进度（下载失败）
+        if (progress < 0) {
+            progressBar.style.width = '0%';
+            progressBar.setAttribute('aria-valuenow', 0);
+            progressText.textContent = '下载失败';
+            // 更新进度条颜色为红色表示失败
+            progressBar.classList.remove('bg-info');
+            progressBar.classList.add('bg-danger');
+        } else {
+            // 正常进度显示
+            progressBar.style.width = `${progress}%`;
+            progressBar.setAttribute('aria-valuenow', progress);
+            progressText.textContent = `${progress}%`;
+            // 确保进度条颜色为正常颜色
+            progressBar.classList.remove('bg-danger');
+            progressBar.classList.add('bg-info');
+        }
         
         // 更新状态信息
         downloadStatus.textContent = data.message || '下载中...';
@@ -199,20 +277,117 @@ class WebSocketManager {
             downloadModelName.textContent = `正在下载模型: ${data.model_name}`;
         }
         
+        // 获取或创建Bootstrap Modal实例
+        let bootstrapModal = bootstrap.Modal.getInstance(modal);
+        if (!bootstrapModal) {
+            bootstrapModal = new bootstrap.Modal(modal, {
+                backdrop: 'static',
+                keyboard: false
+            });
+        }
+        
         // 显示弹窗（如果还没显示）
-        const bootstrapModal = bootstrap.Modal.getInstance(modal) || new bootstrap.Modal(modal);
         if (!modal.classList.contains('show')) {
+            // 重置隐藏状态
+            this.downloadModalHidden = false;
             bootstrapModal.show();
         }
         
-        // 如果下载完成，隐藏弹窗
-        if (progress >= 100) {
+        // 如果下载完成或失败，隐藏弹窗
+        if (progress >= 100 || progress === -1) {
+            // 防止重复处理下载完成/失败事件
+            if (this.downloadModalHidden) {
+                if (typeof statusLogger !== 'undefined') {
+                    statusLogger.info('下载弹窗已隐藏，跳过重复处理');
+                }
+                return;
+            }
+            
+            if (progress >= 100) {
+                if (typeof statusLogger !== 'undefined') {
+                    statusLogger.info('下载完成，准备隐藏弹窗...');
+                }
+                // 立即更新状态显示
+                downloadStatus.textContent = '下载完成，准备开始转录...';
+            } else {
+                if (typeof statusLogger !== 'undefined') {
+                    statusLogger.info('下载失败，准备隐藏弹窗...');
+                }
+                // 立即更新状态显示
+                downloadStatus.textContent = '下载失败，请重试...';
+                // 更新进度条颜色为红色表示失败
+                progressBar.classList.remove('bg-info');
+                progressBar.classList.add('bg-danger');
+            }
+            
+            // 标记为已隐藏，防止重复处理
+            this.downloadModalHidden = true;
+            
+            // 延迟隐藏弹窗，让用户看到完成/失败状态
             setTimeout(() => {
-                bootstrapModal.hide();
-                statusLogger.success('模型下载完成，开始转录...', {
-                    task_id: data.task_id,
-                    type: 'download_complete'
-                });
+                try {
+                    if (typeof statusLogger !== 'undefined') {
+                        statusLogger.info('正在隐藏下载进度弹窗...');
+                    }
+                    
+                    // 确保模态框实例存在
+                    const currentModal = bootstrap.Modal.getInstance(modal);
+                    if (currentModal) {
+                        currentModal.hide();
+                        if (typeof statusLogger !== 'undefined') {
+                            statusLogger.info('下载进度弹窗已隐藏');
+                        }
+                    } else {
+                        // 如果实例不存在，直接移除show类
+                        modal.classList.remove('show');
+                        modal.style.display = 'none';
+                        document.body.classList.remove('modal-open');
+                        const backdrop = document.querySelector('.modal-backdrop');
+                        if (backdrop) {
+                            backdrop.remove();
+                        }
+                        if (typeof statusLogger !== 'undefined') {
+                            statusLogger.info('通过DOM操作隐藏了下载进度弹窗');
+                        }
+                    }
+                    
+                    // 记录日志
+                    if (progress >= 100) {
+                        statusLogger.success('模型下载完成，开始转录...', {
+                            task_id: data.task_id,
+                            type: 'download_complete'
+                        });
+                    } else {
+                        statusLogger.error('模型下载失败', {
+                            task_id: data.task_id,
+                            type: 'download_failed',
+                            message: data.message
+                        });
+                    }
+                    
+                } catch (error) {
+                    if (typeof statusLogger !== 'undefined') {
+                        statusLogger.error('隐藏下载进度弹窗时出错:', error);
+                    }
+                    
+                    // 备用方案：强制隐藏
+                    try {
+                        modal.classList.remove('show');
+                        modal.style.display = 'none';
+                        document.body.classList.remove('modal-open');
+                        const backdrop = document.querySelector('.modal-backdrop');
+                        if (backdrop) {
+                            backdrop.remove();
+                        }
+                        if (typeof statusLogger !== 'undefined') {
+                            statusLogger.info('使用备用方案隐藏了下载进度弹窗');
+                        }
+                    } catch (backupError) {
+                        if (typeof statusLogger !== 'undefined') {
+                            statusLogger.error('备用隐藏方案也失败了:', backupError);
+                        }
+                    }
+                }
             }, 1500); // 1.5秒后隐藏
         }
     }
