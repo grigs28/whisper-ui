@@ -26,17 +26,17 @@ class WebSocketManager {
             reconnection: true,
             reconnectionAttempts: this.maxReconnectAttempts,
             reconnectionDelay: this.reconnectDelay,
-            reconnectionDelayMax: 5000,  // 最大重连延迟5秒
-            timeout: 20000,  // 增加超时时间到20秒
+            reconnectionDelayMax: 10000,  // 最大重连延迟10秒，减少服务器压力
+            timeout: 30000,  // 增加超时时间到30秒
             pingTimeout: 120000,  // 120秒ping超时
-            pingInterval: 30000,   // 30秒ping间隔
+            pingInterval: 60000,   // 增加ping间隔到60秒，减少网络流量
             forceNew: true,  // 强制新连接
             autoConnect: true  // 自动连接
         });
 
         this.setupEventListeners();
         
-        // 启动连接健康监控
+        // 启动连接健康监控 - 适当增加监控间隔
         this.startHealthMonitor();
     }
 
@@ -498,7 +498,7 @@ class WebSocketManager {
      * 监控WebSocket连接健康状态
      */
     startHealthMonitor() {
-        // 每60秒检查一次连接状态，进一步减少频率
+        // 每120秒检查一次连接状态，进一步减少频率
         setInterval(() => {
             if (!this.getConnectionStatus()) {
                 statusLogger.warning('WebSocket连接已断开，尝试重新连接...');
@@ -507,7 +507,7 @@ class WebSocketManager {
                 // 发送心跳测试，但进一步减少频率
                 this.emit('heartbeat_test', { timestamp: Date.now() });
             }
-        }, 60000);  // 增加到60秒，进一步减少请求频率
+        }, 120000);  // 增加到120秒，进一步减少请求频率
     }
 
     /**

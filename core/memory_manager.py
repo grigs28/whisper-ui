@@ -229,12 +229,18 @@ class MemoryEstimationPool:
             if 'allocated_memory' in task and 'allocated_gpu' in task:
                 gpu_id = task['allocated_gpu']
                 memory_size = task['allocated_memory']
+
+                # 若没有有效分配信息则跳过释放，避免 GPUNone 等日志
+                if gpu_id is None or memory_size is None:
+                    logger.debug(f"[MEMORY] 任务 {task.get('id', 'unknown')} 无有效显存分配信息，跳过释放")
+                    return
                 
                 # 处理memory_size为None的情况
+                display_gpu = gpu_id if gpu_id is not None else 'unknown'
                 if memory_size is not None:
-                    logger.info(f"[MEMORY] 开始释放任务 {task.get('id', 'unknown')} 在GPU{gpu_id}的显存 {memory_size:.2f}GB")
+                    logger.info(f"[MEMORY] 开始释放任务 {task.get('id', 'unknown')} 在GPU{display_gpu}的显存 {memory_size:.2f}GB")
                 else:
-                    logger.info(f"[MEMORY] 开始释放任务 {task.get('id', 'unknown')} 在GPU{gpu_id}的显存 (大小未知)")
+                    logger.info(f"[MEMORY] 开始释放任务 {task.get('id', 'unknown')} 在GPU{display_gpu}的显存 (大小未知)")
                 
                 if gpu_id in self.gpu_pools:
                     try:
@@ -244,7 +250,7 @@ class MemoryEstimationPool:
                     except Exception as pool_error:
                         logger.error(f"[MEMORY] GPU{gpu_id}显存池释放失败: {pool_error}", exc_info=True)
                 else:
-                    logger.warning(f"[MEMORY] GPU{gpu_id}不存在于显存池中")
+                    logger.warning(f"[MEMORY] GPU{display_gpu}不存在于显存池中")
                     
                 # 清理任务中的分配信息
                 try:
@@ -259,7 +265,7 @@ class MemoryEstimationPool:
             logger.error(f"[MEMORY] 释放任务 {task.get('id', 'unknown')} 显存失败: {e}", exc_info=True)
         
     def _calculate_duration_factor(self, task: Dict[str, Any]) -> float:
-        """根据音频时长计算显存影响因子 - 改进版本"""
+        """根据音频时长计算显存影响因子 - 简化版本"""
         try:
             # 简化实现，实际应该根据音频文件计算时长
             files = task.get('files', [])
@@ -273,23 +279,21 @@ class MemoryEstimationPool:
             if estimated_total_duration <= self.segment_duration:
                 return 1.0
             else:
-                # 改进的时长因子计算
+                # 简化的时长因子计算 - 移除基础因子
                 segments = estimated_total_duration / self.segment_duration
                 
-                # 基础线性增长（考虑音频特征和中间激活）
-                base_factor = 1.0 + (segments - 1) * 0.25
-                
-                # 长音频额外缓冲（考虑注意力机制的平方复杂度影响）
+                # 只保留长音频的额外缓冲
                 if segments > 10:  # 超过5分钟
                     extra_buffer = (segments - 10) * 0.08
-                    base_factor += extra_buffer
+                    return 1.0 + extra_buffer
                 
                 # 超长音频额外缓冲（超过10分钟）
                 if segments > 20:  # 超过10分钟
                     extra_buffer = (segments - 20) * 0.05
-                    base_factor += extra_buffer
+                    return 1.0 + extra_buffer
                 
-                return base_factor
+                # 短音频直接返回1.0
+                return 1.0
         except Exception as e:
             logger.error(f"计算任务 {task.get('id', 'unknown')} 时长因子失败: {e}", exc_info=True)
             return 1.0
@@ -297,11 +301,11 @@ class MemoryEstimationPool:
     def _get_default_estimation(self, model_name: str) -> float:
         """获取默认显存预估"""
         try:
-            default_estimations = {
-                'tiny': 1.0, 'base': 1.0, 'small': 2.0, 'medium': 5.0,
-                'large': 10.0, 'large-v2': 10.0, 'large-v3': 10.0, 'turbo': 4.5
-            }
-            estimation = default_estimations.get(model_name, 5.0)
+            # 从配置文件获取显存需求
+            from config import WHISPER_MODEL_MEMORY_REQUIREMENTS
+            # 从WHISPER_MODEL_MEMORY_REQUIREMENTS获取基础预估
+            # 确保完全基于配置文件中的设置
+            estimation = WHISPER_MODEL_MEMORY_REQUIREMENTS.get(model_name, 5.0)
             logger.debug(f"使用默认显存预估 {model_name}: {estimation:.2f}GB")
             return estimation
         except Exception as e:

@@ -11,14 +11,16 @@ import torch
 from utils.logger import logger
 from core.queue_manager import IntelligentQueueManager, Task, TaskStatus
 from core.memory_manager import MemoryEstimationPool
+from core.whisper_system import OptimizedWhisperSystem
 
 
 class BatchTaskScheduler:
     """批量任务调度器"""
     
-    def __init__(self, queue_manager: IntelligentQueueManager, memory_pool: MemoryEstimationPool):
+    def __init__(self, queue_manager: IntelligentQueueManager, memory_pool: MemoryEstimationPool, whisper_system: OptimizedWhisperSystem = None):
         self.queue_manager = queue_manager
         self.memory_pool = memory_pool
+        self.whisper_system = whisper_system
         
         # 调度器状态
         self.running = False
@@ -98,6 +100,13 @@ class BatchTaskScheduler:
     def set_task_processor(self, processor: Callable):
         """设置任务处理器"""
         self.task_processor = processor
+        
+    def set_whisper_system(self, whisper_system: OptimizedWhisperSystem):
+        """设置Whisper系统实例"""
+        self.whisper_system = whisper_system
+        # 自动设置任务处理器
+        if whisper_system:
+            self.task_processor = whisper_system._process_single_task
         
     def _scheduler_loop(self):
         """调度器主循环"""
@@ -186,7 +195,7 @@ class BatchTaskScheduler:
             return []
         
     def _build_optimal_batch(self, gpu_id: int, model_name: str, available_tasks: List[Task]) -> List[Task]:
-        """构建最优任务批次"""
+        """构建最优任务批次 - 多文件并行处理，每个文件对应一个模型"""
         try:
             if not available_tasks:
                 return []
@@ -194,56 +203,76 @@ class BatchTaskScheduler:
             # 按优先级排序任务
             sorted_tasks = sorted(available_tasks, key=lambda t: t.priority.value, reverse=True)
             
-            # 尝试构建批次
+            # 多文件并行处理：为每个任务分配独立模型
             batch_tasks = []
+            total_estimated_memory = 0.0
+            
             for task in sorted_tasks:
+                # 验证任务只有一个文件
+                if len(task.files) != 1:
+                    logger.warning(f"[SCHEDULER] 任务 {task.id} 文件数量不为1，跳过: {len(task.files)}")
+                    continue
+                
                 # 将Task对象转换为字典格式，以便memory_pool使用
                 task_dict = task.to_dict()
                 
-                # 检查是否可以分配显存
+                # 使用校准后的显存预估进行判断
+                estimated_memory = self.memory_pool.get_estimated_memory_usage(gpu_id, task.model)
+                logger.info(f"[SCHEDULER] 任务 {task.id} 预估显存: {estimated_memory:.2f}GB")
+                
+                # 检查是否可以分配显存（使用校准后的预估值）
                 if self.memory_pool.allocate_task_memory(gpu_id, task_dict):
                     # 更新Task对象的分配信息
                     task.allocated_memory = task_dict.get('allocated_memory')
                     task.allocated_gpu = task_dict.get('allocated_gpu')
                     batch_tasks.append(task)
+                    total_estimated_memory += estimated_memory
                     
-                    # 达到最大批次大小则停止
+                    logger.info(f"[SCHEDULER] 任务 {task.id} 已分配显存，使用独立模型处理")
+                    
+                    # 检查是否达到最大批次大小限制
                     if len(batch_tasks) >= self.max_batch_size:
+                        logger.info(f"[SCHEDULER] 达到最大批次大小限制: {self.max_batch_size}")
                         break
                 else:
-                    # 显存不足，停止添加更多任务，但保留已分配的任务
+                    # 显存不足，停止添加更多任务
                     logger.info(f"[SCHEDULER] GPU{gpu_id}显存不足，无法为任务 {task.id} 分配显存，停止添加更多任务")
                     break
                     
-            # 如果批次太小则取消分配（但允许单个任务执行）
-            if len(batch_tasks) < self.min_batch_size and len(batch_tasks) > 0:
-                logger.info(f"[SCHEDULER] 批次大小 {len(batch_tasks)} 小于最小要求 {self.min_batch_size}，但允许单个任务执行")
-                # 不释放显存，允许单个任务执行
-                
+            if batch_tasks:
+                logger.info(f"[SCHEDULER] 为GPU{gpu_id}构建批次: {len(batch_tasks)}个任务，总预估显存: {total_estimated_memory:.2f}GB")
+                    
             return batch_tasks
         except Exception as e:
             logger.error(f"[SCHEDULER] 构建任务批次失败: {e}", exc_info=True)
             return []
         
     def _execute_batch_tasks(self, gpu_id: int, model_name: str, batch_tasks: List[Task]):
-        """执行批量任务"""
+        """执行批量任务 - 多文件并行处理，每个文件对应一个模型"""
         try:
-            logger.info(f"[SCHEDULER] 开始为GPU{gpu_id}执行{model_name}模型的{len(batch_tasks)}个任务")
+            logger.info(f"[SCHEDULER] 开始为GPU{gpu_id}执行{model_name}模型的{len(batch_tasks)}个任务（多文件并行处理）")
             
             # 将任务移动到处理中状态
             successful_tasks = []
+            failed_tasks = []
             for task in batch_tasks[:]:  # 使用副本避免在迭代时修改列表
                 logger.info(f"[SCHEDULER] 尝试将任务 {task.id} 移动到处理状态")
                 if not self.queue_manager.move_task_to_processing(task):
-                    # 如果移动失败，释放显存并跳过该任务
+                    # 如果移动失败，释放显存并记录失败任务
                     logger.warning(f"[SCHEDULER] 无法将任务 {task.id} 移动到处理状态，释放已分配的显存")
                     task_dict = task.to_dict()
                     self.memory_pool.release_task_memory(task_dict)
+                    failed_tasks.append(task)
                     batch_tasks.remove(task)
                     logger.warning(f"[SCHEDULER] 已从批次中移除任务 {task.id}")
                 else:
                     logger.info(f"[SCHEDULER] 成功将任务 {task.id} 移动到处理状态")
                     successful_tasks.append(task)
+            
+            # 处理移动失败的任务
+            for task in failed_tasks:
+                logger.warning(f"[SCHEDULER] 标记移动失败的任务 {task.id} 为失败")
+                self.queue_manager.fail_task(task.id, "无法移动到处理状态")
                     
             if not successful_tasks:
                 logger.warning(f"[SCHEDULER] 没有任务成功移动到处理状态，批次执行中止")
@@ -257,9 +286,9 @@ class BatchTaskScheduler:
                     
             logger.info(f"[SCHEDULER] GPU{gpu_id}开始处理{model_name}模型的{len(successful_tasks)}个任务: {[t.id for t in successful_tasks]}")
             
-            # 执行任务处理
-            if self.task_processor:
-                logger.info(f"[SCHEDULER] 找到任务处理器，创建处理线程")
+            # 使用whisper_system进行多文件并行处理
+            if self.whisper_system and self.task_processor:
+                logger.info(f"[SCHEDULER] 使用whisper_system进行多文件并行处理")
                 # 在单独的线程中执行任务处理，避免阻塞调度器
                 processing_thread = threading.Thread(
                     target=self._process_model_tasks,
@@ -274,20 +303,33 @@ class BatchTaskScheduler:
                 
                 logger.info(f"[SCHEDULER] 处理线程已启动，线程ID: {processing_thread.ident}")
             else:
-                logger.error("[SCHEDULER] 未设置任务处理器")
+                logger.error("[SCHEDULER] 未设置whisper_system或任务处理器")
                 # 释放显存并标记任务失败
                 for task in successful_tasks:
-                    task_dict = task.to_dict()
-                    logger.warning(f"[SCHEDULER] 释放任务 {task.id} 的显存")
-                    self.memory_pool.release_task_memory(task_dict)
-                    logger.warning(f"[SCHEDULER] 标记任务 {task.id} 为失败")
-                    self.queue_manager.fail_task(task.id, "任务处理器未设置")
+                    try:
+                        # 检查任务是否已经在处理中状态
+                        if task.id in self.queue_manager.processing_tasks:
+                            logger.warning(f"[SCHEDULER] 任务 {task.id} 已在处理中，跳过处理器未设置的处理")
+                            continue
+                        
+                        task_dict = task.to_dict()
+                        logger.warning(f"[SCHEDULER] 释放任务 {task.id} 的显存")
+                        self.memory_pool.release_task_memory(task_dict)
+                        logger.warning(f"[SCHEDULER] 标记任务 {task.id} 为失败")
+                        self.queue_manager.fail_task(task.id, "whisper_system或任务处理器未设置")
+                    except Exception as e:
+                        logger.error(f"[SCHEDULER] 处理任务 {task.id} 时出错: {e}", exc_info=True)
                     
         except Exception as e:
             logger.error(f"[SCHEDULER] 执行批次任务出错: {e}", exc_info=True)
-            # 释放显存并标记任务失败
+            # 只对未成功移动到处理状态的任务进行失败处理
             for task in batch_tasks:
                 try:
+                    # 检查任务是否已经在处理中状态
+                    if task.id in self.queue_manager.processing_tasks:
+                        logger.warning(f"[SCHEDULER] 任务 {task.id} 已在处理中，跳过异常处理")
+                        continue
+                    
                     task_dict = task.to_dict()
                     logger.warning(f"[SCHEDULER] 异常处理: 释放任务 {task.id} 的显存")
                     self.memory_pool.release_task_memory(task_dict)
@@ -297,13 +339,14 @@ class BatchTaskScheduler:
                     logger.error(f"[SCHEDULER] 清理任务 {task.id} 时发生内部错误: {inner_e}", exc_info=True)
                                 
     def _process_model_tasks(self, gpu_id: int, model_name: str, tasks: List[Task]):
-        """处理模型任务组"""
+        """处理模型任务组 - 多文件并行处理"""
         current_thread = threading.current_thread()
         try:
-            logger.info(f"[PROCESSOR] 开始处理GPU{gpu_id}上的{model_name}模型任务组")
+            logger.info(f"[PROCESSOR] 开始处理GPU{gpu_id}上的{model_name}模型任务组，任务数: {len(tasks)}")
             
-            # 调用任务处理器
-            if self.task_processor:
+            # 使用whisper_system进行多文件并行处理
+            if self.whisper_system and self.task_processor:
+                logger.info(f"[PROCESSOR] 使用whisper_system进行多文件并行处理")
                 # 传递GPU ID和任务列表给处理器
                 results = self.task_processor(gpu_id, tasks)
                 
@@ -311,8 +354,9 @@ class BatchTaskScheduler:
                 self._handle_task_results(tasks, results)
             else:
                 # 处理器未设置，标记所有任务失败
+                logger.error(f"[PROCESSOR] whisper_system或任务处理器未设置")
                 for task in tasks:
-                    self.queue_manager.fail_task(task.id, "任务处理器未设置")
+                    self.queue_manager.fail_task(task.id, "whisper_system或任务处理器未设置")
                     
         except Exception as e:
             logger.error(f"[PROCESSOR] 处理模型任务组出错: {e}", exc_info=True)

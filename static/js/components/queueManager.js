@@ -132,18 +132,19 @@ class QueueManager {
         // 启动时间更新定时器
         this.startTimeUpdateTimer();
         
-        // 添加实时时间更新定时器 - 每秒更新一次
+        // 添加实时时间更新定时器 - 每5秒更新一次，降低频率
         this.realTimeUpdateInterval = setInterval(() => {
             this.updateTimeDisplays();
-        }, 1000);
+        }, 5000);
         
-        // 使用定时器管理器添加时间更新任务
+        // 使用定时器管理器添加时间更新任务 - 减少频率
         timerManager.addTask('queueTimeUpdate', () => {
             const hasProcessingTasks = this.queueItems.some(item => item.status === 'processing');
             if (hasProcessingTasks) {
+                // 只在有处理中任务时更新，减少更新频率
                 this.updateQueueDisplay(this.queueItems);
             }
-        }, 0.2); // 每0.2个主周期执行一次(1秒)
+        }, 0.5); // 每0.5个主周期执行一次(5秒)
 
         // 确保定时器管理器已启动
         if (!timerManager.isRunning) {
@@ -169,10 +170,10 @@ class QueueManager {
      * 启动定期刷新
      */
     startPeriodicRefresh() {
-        // 每2秒刷新一次队列状态，提高更新频率
+        // 每5秒刷新一次队列状态，降低更新频率
         this.refreshInterval = setInterval(() => {
             this.loadQueueState();
-        }, 2000);
+        }, 5000);
 
         // 当页面失去焦点时停止刷新，获得焦点时恢复刷新
         document.addEventListener('visibilitychange', () => {
@@ -185,7 +186,7 @@ class QueueManager {
                 if (!this.refreshInterval) {
                     this.refreshInterval = setInterval(() => {
                         this.loadQueueState();
-                    }, 2000);
+                    }, 5000);
                 }
             }
         });
@@ -341,7 +342,7 @@ class QueueManager {
     }
 
     /**
-     * 更新队列显示
+     * 更新队列显示 - 优化版本，使用文档片段减少DOM操作
      */
     updateQueueDisplay(items) {
         const queueItemsContainer = document.getElementById('queueItems');
@@ -349,8 +350,8 @@ class QueueManager {
 
         if (!queueItemsContainer) return;
 
-        // 清空现有项目
-        queueItemsContainer.innerHTML = '';
+        // 使用文档片段批量更新DOM，减少回流和重绘
+        const fragment = document.createDocumentFragment();
 
         if (items.length === 0) {
             // 显示空闲标签
@@ -359,12 +360,18 @@ class QueueManager {
                 queueInfo.innerHTML = '<span class="badge bg-success"><i class="fas fa-check-circle"></i> 空闲</span>';
             }
 
-            queueItemsContainer.innerHTML = `
-                <div class="text-center py-4">
-                    <i class="fas fa-inbox fa-2x text-muted mb-2"></i>
-                    <p class="text-muted">队列为空</p>
-                </div>
+            // 创建空状态元素
+            const emptyElement = document.createElement('div');
+            emptyElement.className = 'text-center py-4';
+            emptyElement.innerHTML = `
+                <i class="fas fa-inbox fa-2x text-muted mb-2"></i>
+                <p class="text-muted">队列为空</p>
             `;
+            fragment.appendChild(emptyElement);
+            
+            // 清空容器并添加新内容
+            queueItemsContainer.innerHTML = '';
+            queueItemsContainer.appendChild(fragment);
             return;
         }
 
@@ -379,8 +386,12 @@ class QueueManager {
         // 添加每个项目（包括排队和处理中的任务）
         sortedItems.forEach(item => {
             const itemElement = this.createQueueItemElement(item);
-            queueItemsContainer.appendChild(itemElement);
+            fragment.appendChild(itemElement);
         });
+
+        // 清空容器并批量添加新内容
+        queueItemsContainer.innerHTML = '';
+        queueItemsContainer.appendChild(fragment);
     }
 
     /**
@@ -411,6 +422,7 @@ class QueueManager {
     createQueueItemElement(item) {
         const itemDiv = document.createElement('div');
         itemDiv.className = 'queue-item card mb-2';
+        itemDiv.setAttribute('data-task-id', item.id); // 添加任务ID属性，便于快速定位
 
         // 使用filename字段或从files数组中提取文件名
         let displayName = '未知文件';
@@ -438,15 +450,8 @@ class QueueManager {
 
         // 计算转录时间
         let transcriptionTime = '';
-        if (typeof statusLogger !== 'undefined') {
-            statusLogger.debug('Task item for time calculation:', {
-                id: item.id,
-                status: item.status,
-                start_time: item.start_time,
-                created_at: item.created_at
-            });
-        }
         
+        // 修正：添加更健壮的时间计算逻辑，考虑start_time可能尚未设置的情况
         if (item.start_time && item.end_time) {
             // 任务已完成：显示总转录时间
             const startTime = new Date(item.start_time);
@@ -455,9 +460,6 @@ class QueueManager {
             const minutes = Math.floor(duration / 60);
             const seconds = duration % 60;
             transcriptionTime = `${minutes}分${seconds}秒`;
-            if (typeof statusLogger !== 'undefined') {
-                statusLogger.debug('Completed task transcription time:', transcriptionTime);
-            }
         } else if (item.start_time && (item.status === 'processing' || item.status === 'loading')) {
             // 任务处理中：显示当前转录时间
             const startTime = new Date(item.start_time);
@@ -466,13 +468,9 @@ class QueueManager {
             const minutes = Math.floor(duration / 60);
             const seconds = duration % 60;
             transcriptionTime = `${minutes}分${seconds}秒`;
-            if (typeof statusLogger !== 'undefined') {
-                statusLogger.debug('Processing task transcription time:', transcriptionTime);
-            }
-        } else {
-            if (typeof statusLogger !== 'undefined') {
-                statusLogger.debug('No transcription time calculated - missing start_time or wrong status');
-            }
+        } else if (item.status === 'processing' && !item.start_time) {
+            // 任务状态为processing但start_time尚未设置时，显示等待时间
+            transcriptionTime = '等待中...';
         }
 
         // 格式化时间显示
@@ -620,6 +618,8 @@ class QueueManager {
                 return '已完成';
             case 'failed':
                 return '失败';
+            case 'retrying':
+                return '重试中';
             default:
                 return status;
         }
@@ -637,7 +637,7 @@ class QueueManager {
     }
 
     /**
-     * 更新任务状态
+     * 更新任务状态 - 优化版本，避免不必要的完整重渲染
      */
     updateTaskStatus(taskData) {
         statusLogger.system('***【updateTaskStatus】更新本地队列状态 ***');
@@ -648,6 +648,7 @@ class QueueManager {
             // 如果是进度更新，使用平滑过渡
             if (taskData.type === 'progress_update' && this.queueItems[index].progress !== taskData.progress) {
                 this.smoothProgressUpdate(this.queueItems[index], taskData);
+                return; // 进度更新已经处理完毕，不需要后续步骤
             } else {
                 this.queueItems[index] = { ...this.queueItems[index], ...taskData };
             }
@@ -672,8 +673,11 @@ class QueueManager {
                 if (window.fileManager) {
                     statusLogger.system('【updateTaskStatus】开始自动刷新输出文件列表');
                     // 直接调用已验证有效的刷新方法
-                    window.fileManager.refreshFileList('output');
-                    statusLogger.system('【updateTaskStatus】输出文件列表自动刷新完成');
+                    window.fileManager.refreshFileList('output').then(() => {
+                        statusLogger.system('【updateTaskStatus】输出文件列表自动刷新完成');
+                    }).catch((error) => {
+                        statusLogger.error('【updateTaskStatus】输出文件列表刷新失败', { error: error.message });
+                    });
                 } else {
                     statusLogger.error('【updateTaskStatus】FileManager未找到，无法自动刷新输出文件列表');
                 }
@@ -682,10 +686,16 @@ class QueueManager {
             case 'failed':
                 statusLogger.error('【updateTaskStatus】转录任务失败', { task_id: taskData.id, error: taskData.error });
                 break;
+            case 'retrying':
+                statusLogger.warning('【updateTaskStatus】转录任务正在重试', { task_id: taskData.id, retry_count: taskData.retry_count });
+                break;
         }
 
-        // 立即更新显示
-        this.updateQueueDisplay(this.queueItems);
+        // 只在必要时更新显示，避免频繁重渲染
+        if (this.shouldUpdateDisplay(taskData)) {
+            // 立即更新显示
+            this.updateQueueDisplay(this.queueItems);
+        }
         this.updateQueueBadge(this.queueItems.length);
 
         // 如果任务完成或失败，5秒后从本地列表中移除
@@ -697,6 +707,59 @@ class QueueManager {
 
         // 同时从服务器刷新最新状态，确保数据同步
         this.loadQueueState();
+    }
+    
+    /**
+     * 判断是否需要更新显示 - 优化策略
+     */
+    shouldUpdateDisplay(taskData) {
+        // 对于简单的状态变更，如进度更新，不立即重绘整个列表
+        if (taskData.type === 'progress_update') {
+            // 只更新单个任务项，而不是整个列表
+            this.updateSingleTaskElement(taskData);
+            return false;
+        }
+        
+        // 对于状态变更（非进度更新），需要更新整个列表以保持一致性
+        // 特别是对于重试状态，需要确保UI正确显示
+        if (taskData.status === 'retrying' || taskData.status === 'failed' || taskData.status === 'completed') {
+            return true;
+        }
+        
+        // 对于新增任务、任务完成或失败等情况，需要更新整个列表
+        return true;
+    }
+    
+    /**
+     * 更新单个任务元素 - 节省内存和性能
+     */
+    updateSingleTaskElement(taskData) {
+        const itemElement = document.querySelector(`[data-task-id="${taskData.id}"]`);
+        if (itemElement) {
+            // 对于重试状态，避免完全替换元素，只更新必要的内容
+            if (taskData.status === 'retrying') {
+                // 只更新状态徽章
+                const statusBadge = itemElement.querySelector('.status-badge');
+                if (statusBadge) {
+                    statusBadge.textContent = this.getStatusText(taskData.status);
+                    statusBadge.className = `badge bg-${this.getStatusBadgeClass(taskData.status)} status-badge`;
+                }
+                
+                // 更新转录时间显示
+                const transcriptionTimeElement = itemElement.querySelector('[data-transcription-time]');
+                if (transcriptionTimeElement) {
+                    transcriptionTimeElement.innerHTML = `
+                        <i class="fas fa-stopwatch me-1" style="display: inline-block; width: 14px; text-align: center;"></i>
+                        <span>等待中...</span>
+                        <span>(重试中)</span>
+                    `;
+                }
+            } else {
+                // 其他状态使用完整更新
+                const updatedElement = this.createQueueItemElement(taskData);
+                itemElement.parentNode.replaceChild(updatedElement, itemElement);
+            }
+        }
     }
 
     /**
@@ -784,12 +847,25 @@ class QueueManager {
     }
 
     /**
-     * 更新所有时间显示
+     * 更新所有时间显示 - 添加节流机制
      */
     updateTimeDisplays() {
+        // 节流：避免过于频繁的时间更新
+        if (this.lastUpdateTime && Date.now() - this.lastUpdateTime < 1000) {
+            return;
+        }
+        this.lastUpdateTime = Date.now();
+        
         const queueItemsContainer = document.getElementById('queueItems');
         if (!queueItemsContainer) return;
 
+        // 优化：只更新处理中的任务时间显示，减少DOM操作
+        const processingTasks = Array.from(queueItemsContainer.querySelectorAll('.queue-item'))
+            .filter(item => {
+                const statusBadge = item.querySelector('.status-badge');
+                return statusBadge && statusBadge.textContent.trim() === '处理中';
+            });
+        
         // 更新所有任务卡片中的时间显示
         const timeElements = queueItemsContainer.querySelectorAll('[data-time-timestamp]');
         timeElements.forEach(element => {
@@ -800,18 +876,20 @@ class QueueManager {
             }
         });
 
-        // 更新处理时间显示
-        const processingTimeElements = queueItemsContainer.querySelectorAll('[data-processing-time]');
-        processingTimeElements.forEach(element => {
-            const startTime = element.getAttribute('data-processing-time');
-            if (startTime) {
-                const startDate = new Date(startTime);
-                const now = new Date();
-                const processingTime = Math.round((now - startDate) / 1000);
-                const minutes = Math.floor(processingTime / 60);
-                const seconds = processingTime % 60;
-                element.textContent = `${minutes}分${seconds}秒`;
-            }
+        // 优化：只更新处理中任务的处理时间显示
+        processingTasks.forEach(item => {
+            const processingTimeElements = item.querySelectorAll('[data-processing-time]');
+            processingTimeElements.forEach(element => {
+                const startTime = element.getAttribute('data-processing-time');
+                if (startTime) {
+                    const startDate = new Date(startTime);
+                    const now = new Date();
+                    const processingTime = Math.round((now - startDate) / 1000);
+                    const minutes = Math.floor(processingTime / 60);
+                    const seconds = processingTime % 60;
+                    element.textContent = `${minutes}分${seconds}秒`;
+                }
+            });
         });
 
         // 更新转录时间显示 - 实时更新处理中任务的转录时间

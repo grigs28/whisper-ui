@@ -5,6 +5,21 @@
 import os
 from pathlib import Path
 
+# 尝试加载 .env 文件
+try:
+    from dotenv import load_dotenv
+    # 加载 .env 文件
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"[CONFIG] 已加载环境配置文件: {env_path}")
+    else:
+        print(f"[CONFIG] 未找到 .env 文件: {env_path}")
+except ImportError:
+    print("[CONFIG] python-dotenv 未安装，跳过 .env 文件加载")
+except Exception as e:
+    print(f"[CONFIG] 加载 .env 文件失败: {e}")
+
 # 基础配置
 BASE_DIR = Path(__file__).parent.absolute()
 

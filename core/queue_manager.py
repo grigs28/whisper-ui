@@ -74,6 +74,7 @@ class Task:
     allocated_gpu: Optional[int] = None
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
+    output_formats: List[str] = None  # 输出格式列表
     
     def to_dict(self) -> Dict:
         return {
@@ -95,7 +96,8 @@ class Task:
             'allocated_memory': self.allocated_memory,
             'allocated_gpu': self.allocated_gpu,
             'start_time': self.start_time.isoformat() if self.start_time else None,
-            'end_time': self.end_time.isoformat() if self.end_time else None
+            'end_time': self.end_time.isoformat() if self.end_time else None,
+            'output_formats': self.output_formats or ['txt']
         }
 
 
@@ -207,20 +209,8 @@ class IntelligentQueueManager:
                 task = self.processing_tasks[task_id]
                 logger.info(f"[QUEUE] 找到任务 {task_id}，开始处理")
                 
-                # 释放任务显存
-                try:
-                    logger.info(f"[QUEUE] 开始释放任务 {task_id} 的显存")
-                    # 通过优化系统实例释放显存
-                    system = _get_optimized_system()
-                    if system and hasattr(system, 'memory_pool') and hasattr(system.memory_pool, 'release_task_memory'):
-                        task_dict = task.to_dict()
-                        system.memory_pool.release_task_memory(task_dict)
-                        logger.info(f"[QUEUE] 任务 {task_id} 显存已释放")
-                    else:
-                        logger.warning(f"[QUEUE] 无法获取优化系统实例或内存池")
-                except Exception as e:
-                    logger.error(f"[QUEUE] 释放任务 {task_id} 显存失败: {e}", exc_info=True)
-                    # 继续执行，不因为显存释放失败而中断任务完成流程
+                # 显存释放交由处理器与调度器路径负责，完成阶段不再重复释放
+                logger.debug(f"[QUEUE] 任务 {task_id} 完成阶段跳过显存释放（已由处理器/调度器负责）")
                 
                 # 更新任务状态为完成
                 try:
@@ -274,6 +264,14 @@ class IntelligentQueueManager:
                         logger.warning(f"[QUEUE] 尝试失败不存在的任务 {task_id}")
                         return False
                 
+                # 检查任务当前状态，避免重复处理已完成的任务
+                if task.status == TaskStatus.COMPLETED:
+                    logger.warning(f"[QUEUE] 任务 {task_id} 已完成，跳过失败处理")
+                    return True
+                elif task.status == TaskStatus.FAILED:
+                    logger.warning(f"[QUEUE] 任务 {task_id} 已失败，跳过重复失败处理")
+                    return True
+                
                 # 释放任务显存
                 try:
                     # 通过优化系统实例释放显存
@@ -297,15 +295,15 @@ class IntelligentQueueManager:
                 # 如果需要重试且重试次数未达上限
                 if should_retry and task.retry_count < task.max_retries:
                     try:
-                        task.status = TaskStatus.RETRYING
+                        task.status = TaskStatus.PENDING  # 修复：重试任务应该设为PENDING状态
                         task.retry_count += 1
                         self.stats['total_retried'] += 1
                         
-                        # 重新加入队列头部
+                        # 重新加入队列尾部（按要求修改）
                         if task.id in self.processing_tasks:
                             del self.processing_tasks[task.id]
                             self.current_tasks -= 1
-                        self.queues[task.model].appendleft(task)
+                        self.queues[task.model].append(task)
                         # 更新映射
                         self._task_queue_mapping[task.id] = self.queues[task.model]
                         logger.info(f"[QUEUE] 任务 {task_id} 失败, 将重试 (第{task.retry_count}次)")
@@ -365,9 +363,9 @@ class IntelligentQueueManager:
                     del self.processing_tasks[task_id]
                     self.current_tasks -= 1
                     
-                # 如果任务不在队列中，则添加到队列
+                # 如果任务不在队列中，则添加到队列尾部（按要求修改）
                 if task not in self.queues[task.model]:
-                    self.queues[task.model].appendleft(task)
+                    self.queues[task.model].append(task)
                     # 更新映射
                     self._task_queue_mapping[task.id] = self.queues[task.model]
                     

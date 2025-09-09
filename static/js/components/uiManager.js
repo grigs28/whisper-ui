@@ -198,16 +198,8 @@ class UIManager {
         
         if (modelSelector && modelMemoryElement) {
             const selectedModel = modelSelector.value;
-            const modelMemoryRequirements = {
-                'tiny': '~1GB',
-                'base': '~1GB',
-                'small': '~2GB',
-                'medium': '~5GB',
-                'large': '~10GB',
-                'large-v2': '~10GB',
-                'large-v3': '~10GB',
-                'turbo': '~6GB'
-            };
+            // 优先使用后端注入的映射，回退到空对象
+            const modelMemoryRequirements = (window.MODEL_MEMORY_REQUIREMENTS || {});
             
             if (modelMemoryRequirements[selectedModel]) {
                 modelMemoryElement.textContent = modelMemoryRequirements[selectedModel];

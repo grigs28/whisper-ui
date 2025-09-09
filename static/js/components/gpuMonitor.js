@@ -340,16 +340,10 @@ class GPUMonitor {
     async smartSelectGPU() {
         const modelSelector = document.getElementById('modelSelector');
         const gpuSelector = document.getElementById('gpuSelector');
-        const modelMemoryRequirements = {
-            'tiny': 1.0,  // GB
-            'base': 1.0,
-            'small': 2.0,
-            'medium': 5.0,
-            'large': 10.0,
-            'large-v2': 10.0,
-            'large-v3': 10.0,
-            'turbo': 6.0
-        };
+        // 使用后端注入的映射，若不存在则回退为空对象
+        const modelMemoryRequirements = (window.MODEL_MEMORY_REQUIREMENTS
+            ? Object.fromEntries(Object.entries(window.MODEL_MEMORY_REQUIREMENTS).map(([k, v]) => [k, parseFloat(String(v).replace(/[^0-9.]/g, ''))]))
+            : {});
 
         if (modelSelector && gpuSelector) {
             const selectedModel = modelSelector.value;
@@ -378,18 +372,47 @@ class GPUMonitor {
                             gpuSelector.value = bestGPU.id;
                             statusLogger.info(`已为模型 ${selectedModel} 自动选择${bestGPU.name} (空闲内存: ${maxFreeMemory.toFixed(1)}GB)`);
                         } else {
-                            // 没有合适的GPU，选择CPU
-                            gpuSelector.value = 'cpu';
-                            statusLogger.warn(`模型 ${selectedModel} 需要约 ${requiredMemory}GB 内存，但所有GPU内存都不足。已自动选择CPU。`);
+                            // 有GPU但显存不足时，选择显存最多的GPU并等待
+                            let maxMemoryGPU = null;
+                            let maxMemory = 0;
+                            selectorData.gpus.forEach(gpu => {
+                                if (gpu.type === 'gpu' && gpu.memory_free > maxMemory) {
+                                    maxMemory = gpu.memory_free;
+                                    maxMemoryGPU = gpu;
+                                }
+                            });
+                            
+                            if (maxMemoryGPU) {
+                                gpuSelector.value = maxMemoryGPU.id;
+                                statusLogger.warn(`模型 ${selectedModel} 需要约 ${requiredMemory}GB 内存，但当前GPU显存不足。已选择${maxMemoryGPU.name}，任务将排队等待显存释放。`);
+                            } else {
+                                // 没有GPU时才能选择CPU
+                                gpuSelector.value = 'cpu';
+                                statusLogger.warn(`未检测到可用GPU，已选择CPU处理。`);
+                            }
                         }
                     } else {
-                        // 获取失败，默认选择CPU
-                        gpuSelector.value = 'cpu';
-                        statusLogger.info('无法获取GPU信息，已选择CPU处理');
+                        // 获取失败时，尝试选择第一个可用GPU
+                        const firstGPU = selectorData.gpus.find(gpu => gpu.type === 'gpu');
+                        if (firstGPU) {
+                            gpuSelector.value = firstGPU.id;
+                            statusLogger.warn('无法获取GPU详细信息，已选择第一个可用GPU');
+                        } else {
+                            gpuSelector.value = 'cpu';
+                            statusLogger.info('未检测到可用GPU，已选择CPU处理');
+                        }
                     }
                 } catch (error) {
                     statusLogger.warning('智能选择GPU时发生错误: ' + error.message);
-                    gpuSelector.value = 'cpu';
+                    // 错误时优先选择GPU而不是CPU
+                    const gpuOptions = Array.from(gpuSelector.options).filter(opt => opt.value.startsWith('gpu_'));
+                    if (gpuOptions.length > 0) {
+                        gpuSelector.value = gpuOptions[0].value;
+                        statusLogger.warn('发生错误，已选择第一个可用GPU');
+                    } else {
+                        gpuSelector.value = 'cpu';
+                        statusLogger.warn('发生错误且无可用GPU，已选择CPU');
+                    }
                 }
             }
         }

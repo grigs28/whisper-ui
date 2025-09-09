@@ -19,6 +19,9 @@ class TranscriptionController {
                 this.startTranscription();
             });
         }
+        
+        // 初始化输出格式下拉框
+        this.initOutputFormatDropdown();
     }
 
     /**
@@ -42,11 +45,17 @@ class TranscriptionController {
         const model = document.getElementById('modelSelector')?.value || 'base';
         const language = document.getElementById('languageSelector')?.value || 'auto';
         const gpu = document.getElementById('gpuSelector')?.value || '';
-        const outputFormat = document.getElementById('outputFormatSelector')?.value || 'json';
+        
+        // 获取多选的输出格式
+        const outputFormats = this.getSelectedOutputFormats();
+        if (outputFormats.length === 0) {
+            showNotification('请至少选择一种输出格式', 'warning');
+            return;
+        }
 
         try {
             this.isTranscribing = true; // 设置转录状态
-            statusLogger.info('开始转录任务...', { files: selectedFiles, model, language, gpu, outputFormat });
+            statusLogger.info('开始转录任务...', { files: selectedFiles, model, language, gpu, outputFormats });
             // 发送转录任务到服务器
             const response = await fetch('/transcribe', {
                 method: 'POST',
@@ -58,7 +67,7 @@ class TranscriptionController {
                     model: model,
                     language: language,
                     gpus: gpu ? [gpu] : [], // 确保传递数组格式
-                    output_format: outputFormat
+                    output_formats: outputFormats
                 })
             });
 
@@ -170,6 +179,65 @@ class TranscriptionController {
         // 这里可以实现更新队列显示的逻辑
         // 目前通过刷新页面来更新
         location.reload();
+    }
+
+    /**
+     * 获取选中的输出格式
+     */
+    getSelectedOutputFormats() {
+        const checkboxes = document.querySelectorAll('input[type="checkbox"][id^="format"]');
+        const formats = [];
+        
+        checkboxes.forEach(checkbox => {
+            if (checkbox.checked) {
+                formats.push(checkbox.value);
+            }
+        });
+        
+        // 如果没有选中任何选项，返回默认格式
+        return formats.length > 0 ? formats : ['txt'];
+    }
+
+    /**
+     * 初始化输出格式下拉框
+     */
+    initOutputFormatDropdown() {
+        const checkboxes = document.querySelectorAll('input[type="checkbox"][id^="format"]');
+        const outputFormatText = document.getElementById('outputFormatText');
+        const outputFormatMenu = document.getElementById('outputFormatMenu');
+        
+        // 更新按钮文本
+        const updateButtonText = () => {
+            const selectedFormats = this.getSelectedOutputFormats();
+            if (selectedFormats.length === 0) {
+                outputFormatText.textContent = '请选择输出格式';
+            } else if (selectedFormats.length === 1) {
+                const formatNames = {
+                    'txt': '纯文本格式 (.txt)',
+                    'srt': 'SRT字幕格式 (.srt)',
+                    'vtt': 'VTT字幕格式 (.vtt)',
+                    'json': 'JSON格式 (.json)'
+                };
+                outputFormatText.textContent = formatNames[selectedFormats[0]] || selectedFormats[0];
+            } else {
+                outputFormatText.textContent = `已选择 ${selectedFormats.length} 种格式`;
+            }
+        };
+        
+        // 为每个复选框添加事件监听器
+        checkboxes.forEach(checkbox => {
+            checkbox.addEventListener('change', updateButtonText);
+        });
+        
+        // 阻止下拉菜单点击时关闭
+        if (outputFormatMenu) {
+            outputFormatMenu.addEventListener('click', (e) => {
+                e.stopPropagation();
+            });
+        }
+        
+        // 初始化按钮文本
+        updateButtonText();
     }
 }
 

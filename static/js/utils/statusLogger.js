@@ -25,7 +25,17 @@ class StatusLogger {
             const response = await fetch('/api/config');
             if (response.ok) {
                 const config = await response.json();
-                this.enableConsoleLog = config.enable_browser_console_log === true; // 只有明确为true时才启用
+                // 修正：正确处理布尔值转换，支持字符串"True"/"False"
+                // 首先检查是否为布尔值
+                if (typeof config.enable_browser_console_log === 'boolean') {
+                    this.enableConsoleLog = config.enable_browser_console_log;
+                } else if (typeof config.enable_browser_console_log === 'string') {
+                    // 如果是字符串，转换为布尔值
+                    this.enableConsoleLog = config.enable_browser_console_log.toLowerCase() === 'true';
+                } else {
+                    // 默认值
+                    this.enableConsoleLog = false;
+                }
             }
         } catch (error) {
             console.warn('无法获取日志配置，使用默认设置:', error);
@@ -58,8 +68,10 @@ class StatusLogger {
         // 2. 输出到浏览器控制台（新增）
         this.logToConsole(logEntry);
         
-        // 3. 输出到WebSocket（新增）
-        this.sendToWebSocket(logEntry);
+        // 3. 输出到WebSocket（新增）- 只在启用时发送
+        if (this.enableConsoleLog) {
+            this.sendToWebSocket(logEntry);
+        }
     }
 
     /**

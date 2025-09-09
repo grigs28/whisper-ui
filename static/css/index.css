@@ -42,7 +42,7 @@ body {
 .drop-area {
     transition: all 0.3s ease;
     cursor: pointer;
-    min-height: 220px;
+    min-height: 380px;
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -975,4 +975,51 @@ body {
 #readmeModal .markdown-content h5,
 #readmeModal .markdown-content h6 {
     font-size: 1rem;
+}
+
+/* 输出格式下拉多选样式 */
+#outputFormatDropdown {
+    text-align: left;
+    position: relative;
+}
+
+#outputFormatDropdown::after {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+#outputFormatMenu {
+    min-width: 100%;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+#outputFormatMenu .dropdown-item-text {
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid #e9ecef;
+}
+
+#outputFormatMenu .dropdown-item-text:last-child {
+    border-bottom: none;
+}
+
+#outputFormatMenu .form-check {
+    margin: 0;
+}
+
+#outputFormatMenu .form-check-input {
+    margin-right: 0.5rem;
+}
+
+#outputFormatMenu .form-check-label {
+    cursor: pointer;
+    margin: 0;
+    font-size: 0.9rem;
+}
+
+#outputFormatMenu .form-check-input:checked + .form-check-label {
+    font-weight: 500;
+    color: #007bff;
 }

@@ -415,11 +415,11 @@ class GPUMemoryPool:
     def _get_default_estimation(self, model_name: str) -> float:
         """获取默认显存预估"""
         try:
-            default_estimations = {
-                'tiny': 1.0, 'base': 1.0, 'small': 2.0, 'medium': 5.0,
-                'large': 10.0, 'large-v2': 10.0, 'large-v3': 10.0, 'turbo': 4.5
-            }
-            estimation = default_estimations.get(model_name, 5.0)
+            # 从配置文件获取显存需求
+            from config import WHISPER_MODEL_MEMORY_REQUIREMENTS
+            # 从WHISPER_MODEL_MEMORY_REQUIREMENTS获取基础预估
+            # 确保完全基于配置文件中的设置
+            estimation = WHISPER_MODEL_MEMORY_REQUIREMENTS.get(model_name, 5.0)
             logger.debug(f"GPU{self.gpu_id} 使用默认显存预估 {model_name}: {estimation:.2f}GB")
             return estimation
         except Exception as e:

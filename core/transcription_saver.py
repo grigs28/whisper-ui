@@ -59,7 +59,7 @@ class TranscriptionSaver:
             
             # 获取任务信息
             filename = task_data.get('files', ['unknown'])[0]
-            output_format = task_data.get('output_format', 'txt')
+            output_formats = task_data.get('output_formats', ['txt'])  # 支持多个输出格式
             task_id = task_data.get('task_id', 'unknown')
             
             # 获取不带扩展名的文件名
@@ -76,30 +76,32 @@ class TranscriptionSaver:
                         segment['text'] = self.convert_to_simplified(segment['text'])
             
             # 根据输出格式保存文件
-            if output_format == 'txt':
-                saved_file = self._save_txt(base_filename, text, task_id)
-                saved_files.append(saved_file)
+            for output_format in output_formats:
+                if output_format == 'txt':
+                    saved_file = self._save_txt(base_filename, text, task_id)
+                    saved_files.append(saved_file)
+                    
+                elif output_format == 'srt':
+                    saved_file = self._save_srt(base_filename, segments, task_id)
+                    saved_files.append(saved_file)
+                    
+                elif output_format == 'vtt':
+                    saved_file = self._save_vtt(base_filename, segments, task_id)
+                    saved_files.append(saved_file)
+                    
+                elif output_format == 'json':
+                    # 更新转录结果中的文本
+                    transcription_result_copy = transcription_result.copy()
+                    transcription_result_copy['text'] = text
+                    transcription_result_copy['segments'] = segments
+                    saved_file = self._save_json(base_filename, transcription_result_copy, task_id)
+                    saved_files.append(saved_file)
                 
-            elif output_format == 'srt':
-                saved_file = self._save_srt(base_filename, segments, task_id)
-                saved_files.append(saved_file)
-                
-            elif output_format == 'vtt':
-                saved_file = self._save_vtt(base_filename, segments, task_id)
-                saved_files.append(saved_file)
-                
-            elif output_format == 'json':
-                # 更新转录结果中的文本
-                transcription_result['text'] = text
-                transcription_result['segments'] = segments
-                saved_file = self._save_json(base_filename, transcription_result, task_id)
-                saved_files.append(saved_file)
-            
-            else:
-                # 默认保存为txt格式
-                logger.warning(f"未知的输出格式: {output_format}，默认保存为txt格式")
-                saved_file = self._save_txt(base_filename, text, task_id)
-                saved_files.append(saved_file)
+                else:
+                    # 未知格式，默认保存为txt格式
+                    logger.warning(f"未知的输出格式: {output_format}，默认保存为txt格式")
+                    saved_file = self._save_txt(base_filename, text, task_id)
+                    saved_files.append(saved_file)
             
             logger.info(f"转录结果已保存: {len(saved_files)} 个文件")
             return saved_files

@@ -105,6 +105,22 @@
                                 <small class="text-muted">当前模型内存需求: <span id="modelMemoryInfo">--</span></small>
                             </div>
                         </div>
+                        <script id="model-memory-map" type="application/json">
+{{ model_memory_requirements | tojson }}
+                        </script>
+                        <script>
+                            // 从内联的 JSON 脚本解析模型内存需求，避免模板语法干扰JS解析
+                            (function() {
+                                try {
+                                    var el = document.getElementById('model-memory-map');
+                                    if (el && (!window.MODEL_MEMORY_REQUIREMENTS || Object.keys(window.MODEL_MEMORY_REQUIREMENTS).length === 0)) {
+                                        window.MODEL_MEMORY_REQUIREMENTS = JSON.parse(el.textContent || '{}');
+                                    }
+                                } catch (e) {
+                                    // 静默失败，前端将回退到默认逻辑
+                                }
+                            })();
+                        </script>
                         
                         <div class="mb-3">
                             <label for="gpuSelector" class="form-label">GPU选择</label>
@@ -126,13 +142,55 @@
 
                         <div class="mb-3">
                             <label for="outputFormatSelector" class="form-label">输出格式</label>
-                            <select class="form-select" id="outputFormatSelector">
-                                <option value="txt" selected>纯文本格式 (.txt)</option>
-                                <option value="srt">SRT字幕格式 (.srt)</option>
-                                <option value="vtt">VTT字幕格式 (.vtt)</option>
-                                <option value="json">JSON格式 (.json)</option>
-                            </select>
-                            <small class="text-muted">选择转录结果的输出格式</small>
+                            <div class="dropdown">
+                                <button class="btn btn-outline-secondary dropdown-toggle w-100 text-start" type="button" 
+                                        id="outputFormatDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                                    <span id="outputFormatText">纯文本格式 (.txt)</span>
+                                </button>
+                                <ul class="dropdown-menu w-100" id="outputFormatMenu">
+                                    <li>
+                                        <div class="dropdown-item-text">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" value="txt" id="formatTxt" checked>
+                                                <label class="form-check-label" for="formatTxt">
+                                                    纯文本格式 (.txt)
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </li>
+                                    <li>
+                                        <div class="dropdown-item-text">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" value="srt" id="formatSrt">
+                                                <label class="form-check-label" for="formatSrt">
+                                                    SRT字幕格式 (.srt)
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </li>
+                                    <li>
+                                        <div class="dropdown-item-text">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" value="vtt" id="formatVtt">
+                                                <label class="form-check-label" for="formatVtt">
+                                                    VTT字幕格式 (.vtt)
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </li>
+                                    <li>
+                                        <div class="dropdown-item-text">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" value="json" id="formatJson">
+                                                <label class="form-check-label" for="formatJson">
+                                                    JSON格式 (.json)
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </li>
+                                </ul>
+                            </div>
+                            <small class="text-muted">点击选择多种输出格式</small>
                         </div>
 
                     </div>
@@ -160,7 +218,7 @@
                         <div id="queueInfo" class="text-center py-2 bg-light">
                             空闲
                         </div>
-                        <div id="queueItems" class="p-2" style="max-height: 280px; overflow-y: auto;">
+                        <div id="queueItems" class="p-2" style="max-height: 500px; overflow-y: auto;">
                             <!-- 队列项将在这里动态添加 -->
                         </div>
                     </div>

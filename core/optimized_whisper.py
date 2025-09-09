@@ -5,9 +5,17 @@ import logging
 import os
 import json
 import opencc
+import numpy as np
+import multiprocessing as mp
 from typing import Dict, List, Any, Optional, Callable
 from datetime import datetime
-import torch
+
+# 关键：在任何torch导入之前设置spawn模式
+mp.set_start_method("spawn", force=True)
+
+# 延迟导入torch和whisper，避免父进程CUDA初始化
+torch = None
+whisper = None
 
 from utils.logger import logger
 from core.queue_manager import IntelligentQueueManager, Task, TaskStatus, TaskPriority
@@ -15,7 +23,78 @@ from core.memory_manager import MemoryEstimationPool
 from core.batch_scheduler import BatchTaskScheduler
 from core.gpu_manager import EnhancedGPUManager, GPUMemoryPool
 from core.transcription_saver import transcription_saver
+from core.whisper_system import OptimizedWhisperSystem as WhisperSystem
 from config import config
+
+
+# ==================== SPAWN进程工作函数 ====================
+def _transcribe_file_worker(args: tuple) -> Dict[str, Any]:
+    """
+    顶层工作函数，在spawn进程中执行转录
+    关键：这里才第一次import torch/whisper，避免父进程CUDA初始化
+    """
+    gpu_id, model_name, file_path, task_id, upload_folder = args
+    
+    try:
+        # 设置CUDA可见设备
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        
+        # 关键：在子进程中才第一次import torch/whisper
+        import torch
+        import whisper
+        
+        # 设置CUDA设备（对子进程就是0）
+        torch.cuda.set_device(0)
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
+        logger.info(f"[WORKER] 子进程开始处理任务 {task_id}，模型: {model_name}，文件: {file_path}")
+        
+        # 构建完整文件路径
+        if not os.path.isabs(file_path):
+            full_file_path = os.path.join(upload_folder, file_path)
+        else:
+            full_file_path = file_path
+            
+        # 检查文件是否存在
+        if not os.path.exists(full_file_path):
+            raise FileNotFoundError(f"文件不存在: {full_file_path}")
+        
+        # 加载模型
+        model = whisper.load_model(model_name, device="cuda:0")
+        logger.info(f"[WORKER] 模型 {model_name} 加载成功")
+        
+        # 转录
+        result = model.transcribe(full_file_path)
+        
+        # 清理模型
+        del model
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
+        logger.info(f"[WORKER] 任务 {task_id} 转录完成")
+        
+        return {
+            'task_id': task_id,
+            'success': True,
+            'result': result,
+            'file_path': full_file_path
+        }
+        
+    except Exception as e:
+        logger.error(f"[WORKER] 任务 {task_id} 处理失败: {e}", exc_info=True)
+        return {
+            'task_id': task_id,
+            'success': False,
+            'error': str(e),
+            'file_path': file_path
+        }
+
+
+def _worker_init(gpu_id: int):
+    """工作进程初始化函数"""
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    logger.info(f"[WORKER] 工作进程初始化，GPU: {gpu_id}")
 
 
 # 添加模型下载进度监控类
@@ -183,13 +262,21 @@ class OptimizedWhisperSystem:
             self.gpu_manager = EnhancedGPUManager()
             self.memory_pool = MemoryEstimationPool(self.gpu_manager)  # 传入gpu_manager实例
             self.queue_manager = IntelligentQueueManager()
-            self.batch_scheduler = BatchTaskScheduler(self.queue_manager, self.memory_pool)
+            
+            # 初始化whisper_system
+            self.whisper_system = WhisperSystem(socketio)
+            
+            # 初始化批量调度器，传入whisper_system
+            self.batch_scheduler = BatchTaskScheduler(self.queue_manager, self.memory_pool, self.whisper_system)
             
             # 初始化GPU显存池
             self._initialize_gpu_pools()
             
-            # 设置任务处理器
-            self.batch_scheduler.set_task_processor(self._process_single_task)
+            # 设置whisper_system作为任务处理器
+            self.batch_scheduler.set_whisper_system(self.whisper_system)
+            
+            # 启动批量调度器
+            self.batch_scheduler.start_scheduler()
             
             # 任务进度回调
             self.progress_callbacks: List[Callable] = []
@@ -303,32 +390,149 @@ class OptimizedWhisperSystem:
             raise
             
     def submit_task(self, task_data: Dict[str, Any]) -> str:
-        """提交转录任务"""
+        """提交转录任务 - 一个文件对应一个模型，支持多文件并行处理"""
         try:
+            # 验证任务数据
+            files = task_data.get('files', [])
+            if len(files) != 1:
+                raise ValueError(f"每个任务只能包含一个文件，当前包含 {len(files)} 个文件")
+            
             # 创建任务对象
             task = Task(
                 id=task_data.get('task_id') or f"task_{int(time.time() * 1000)}",
                 user_id=task_data.get('user_id', 'unknown'),
-                files=task_data.get('files', []),
+                files=files,  # 确保只有一个文件
                 model=task_data.get('model', 'medium'),
                 task_type=task_data.get('task_type', 'transcription'),
                 priority=TaskPriority(task_data.get('priority', 2)),  # 默认NORMAL
                 status=TaskStatus.PENDING,
                 created_at=datetime.now(),
                 updated_at=datetime.now(),
-                max_retries=task_data.get('max_retries', 3)
+                max_retries=task_data.get('max_retries', 3),
+                output_formats=task_data.get('output_formats', ['txt'])  # 添加输出格式
             )
             
-            # 添加到队列
+            # 添加到待处理队列
             if self.queue_manager.add_task(task):
-                logger.info(f"[SYSTEM] 任务 {task.id} 已提交到队列")
-                return task.id
+                logger.info(f"[SYSTEM] 任务 {task.id} 已添加到待处理队列，文件: {files[0]}")
             else:
                 raise Exception("添加任务到队列失败")
+            
+            return task.id
                 
         except Exception as e:
             logger.error(f"[SYSTEM] 提交任务失败: {e}", exc_info=True)
             raise
+    
+    # 任务处理相关函数已删除，现在使用批量调度器处理
+    
+    def _process_single_file(self, task: Task, gpu_id: int) -> Dict[str, Any]:
+        """处理单个文件 - 一个文件对应一个模型"""
+        try:
+            device = f"cuda:{gpu_id}" if gpu_id >= 0 else "cpu"
+            file_path = task.files[0]  # 只有一个文件
+            
+            # 处理文件路径，确保是完整路径
+            if not os.path.isabs(file_path):
+                full_file_path = os.path.join(config.UPLOAD_FOLDER, file_path)
+            else:
+                full_file_path = file_path
+            
+            # 检查文件是否存在
+            if not os.path.exists(full_file_path):
+                raise FileNotFoundError(f"音频文件不存在: {full_file_path}")
+            
+            logger.info(f"[PROCESSOR] 开始处理文件 {full_file_path}，使用设备 {device}")
+            
+            # 加载模型
+            model = self._load_model(task.model, device, task.id)
+            
+            # 记录模型加载后的显存使用情况
+            if device.startswith('cuda'):
+                try:
+                    torch.cuda.synchronize()
+                    actual_memory_usage = torch.cuda.memory_allocated(gpu_id) / (1024**3)  # 转换为GB
+                    estimated_memory = self.memory_pool.get_estimated_memory_usage(gpu_id, task.model)
+                    logger.info(f"[PROCESSOR] 记录模型显存使用: {task.model} 预估{estimated_memory:.2f}GB 实际{actual_memory_usage:.2f}GB")
+                    
+                    # 动态校准模型显存使用量
+                    self.calibrate_model_memory(gpu_id, task.model, actual_memory_usage)
+                except Exception as e:
+                    logger.warning(f"[PROCESSOR] 记录模型显存使用失败: {e}")
+            
+            try:
+                # 更新进度到20% - 开始转录
+                self.queue_manager.update_task_progress(task.id, 20, "正在转录...")
+                
+                # 启动转录进度监控线程
+                import threading
+                import time
+                stop_progress = threading.Event()
+                
+                def transcription_progress_monitor():
+                    """转录进度监控线程"""
+                    current_progress = 20
+                    while not stop_progress.is_set() and current_progress < 90:
+                        time.sleep(2)  # 每2秒更新一次
+                        if not stop_progress.is_set():
+                            current_progress += 5  # 每次增加5%
+                            if current_progress > 90:
+                                current_progress = 90
+                            
+                            self.queue_manager.update_task_progress(
+                                task.id,
+                                current_progress,
+                                f"正在转录文件: {os.path.basename(full_file_path)} ({int(current_progress)}%)"
+                            )
+                
+                # 启动进度监控线程
+                progress_thread = threading.Thread(target=transcription_progress_monitor, daemon=True)
+                progress_thread.start()
+                
+                try:
+                    # 执行转录
+                    result = model.transcribe(full_file_path)
+                finally:
+                    # 停止进度监控
+                    stop_progress.set()
+                    progress_thread.join(timeout=1)
+                
+                # 更新进度到90% - 开始保存结果
+                self.queue_manager.update_task_progress(task.id, 90, "正在保存转录结果...")
+                
+                # 保存转录结果到outputs目录
+                try:
+                    saved_files = transcription_saver.save_transcription_result(task.__dict__, result)
+                    if saved_files:
+                        logger.info(f"[PROCESSOR] 任务 {task.id} 转录结果已保存到: {saved_files}")
+                        # 将保存的文件路径添加到结果中
+                        result['saved_files'] = saved_files
+                    else:
+                        logger.warning(f"[PROCESSOR] 任务 {task.id} 转录结果保存失败")
+                except Exception as save_error:
+                    logger.error(f"[PROCESSOR] 保存转录结果失败 {task.id}: {save_error}")
+                
+                # 更新进度到100% - 任务完成
+                self.queue_manager.update_task_progress(task.id, 100, "任务处理完成！")
+                
+                return {
+                    'success': True,
+                    'task_id': task.id,
+                    'file_path': full_file_path,
+                    'result': result
+                }
+                
+            finally:
+                # 释放模型
+                del model
+                if device.startswith('cuda'):
+                    self._safe_cuda_cleanup(gpu_id)
+                
+        except Exception as e:
+            logger.error(f"[PROCESSOR] 处理文件失败: {e}", exc_info=True)
+            raise
+    
+    # 资源清理和结果保存功能已移至批量调度器处理
             
     def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
         """获取任务状态"""
@@ -388,315 +592,149 @@ class OptimizedWhisperSystem:
                 logger.debug(f"[SYSTEM] SocketIO未设置，跳过任务状态更新")
         except Exception as e:
             logger.error(f"[SYSTEM] 通知任务状态变更失败: {e}", exc_info=True)
+    
+    # 任务调度器已删除，现在使用批量调度器
+    
+    def _safe_cuda_cleanup(self, gpu_id: int):
+        """安全的CUDA清理，不影响其他正在运行的任务"""
+        try:
+            # 只清理当前GPU的缓存，不改变全局设备设置
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            
+            # 强制垃圾回收
+            import gc
+            gc.collect()
+            
+            # 再次清理缓存
+            torch.cuda.empty_cache()
+            
+            logger.info(f"[PROCESSOR] GPU {gpu_id} 缓存已安全清理")
+            
+        except Exception as e:
+            logger.warning(f"[PROCESSOR] GPU {gpu_id} 缓存清理出现警告: {e}")
+            # 不抛出异常，避免影响其他任务
         
     def _process_single_task(self, gpu_id: int, tasks: List[Task]) -> List[Dict[str, Any]]:
-        """处理单个任务（实际的转录处理）"""
+        """
+        使用whisper_system进行多文件并行处理
+        关键：每个任务在独立的spawn进程中执行，避免CUDA上下文冲突
+        """
         try:
-            results = []
+            logger.info(f"[PROCESSOR] 开始使用whisper_system处理 {len(tasks)} 个任务，GPU: {gpu_id}")
             
-            # 设置设备
-            device = f"cuda:{gpu_id}" if gpu_id >= 0 else "cpu"
-            
-            # 加载模型（可以缓存以提高效率）
-            model_name = tasks[0].model if tasks else "medium"
-            task_id = tasks[0].id if tasks else None
-            model = self._load_model(model_name, device, task_id)
-            
+            # 验证所有任务都只有一个文件
+            valid_tasks = []
             for task in tasks:
-                try:
-                    logger.info(f"[PROCESSOR] 开始处理任务 {task.id} on {device}")
-                    
-                    # 更新任务状态为处理中
-                    self.queue_manager.update_task_progress(task.id, 5, "开始处理任务...")
-                    
-                    # 处理每个文件
-                    transcriptions = []
-                    total_files = len(task.files)
-                    
-                    # 根据文件数量调整进度更新策略
-                    progress_step = min(8, max(3, 80 // total_files))  # 每个文件3-8%的进度
-                    
-                    for file_index, file_path in enumerate(task.files):
-                        try:
-                            # 文件处理开始 - 更新进度
-                            file_start_progress = 5 + (progress_step * file_index)
-                            file_name = os.path.basename(file_path)
-                            self.queue_manager.update_task_progress(
-                                task.id, 
-                                file_start_progress, 
-                                f"开始处理文件 {file_index + 1}/{total_files}: {file_name}"
-                            )
-                            
-                            # 读取音频文件
-                            audio = self._load_audio(file_path)
-                            
-                            # 音频加载完成 - 更新进度
-                            audio_loaded_progress = file_start_progress + (progress_step * 0.3)
-                            self.queue_manager.update_task_progress(
-                                task.id, 
-                                audio_loaded_progress, 
-                                f"音频文件加载完成，开始转录: {file_name}"
-                            )
-                            
-                            # 转录处理 - 添加实时进度更新
-                            transcription_start_progress = audio_loaded_progress
-                            transcription_end_progress = file_start_progress + (progress_step * 0.8)
-                            
-                            # 启动转录进度监控线程
-                            import threading
-                            import time
-                            stop_progress = threading.Event()
-                            
-                            def transcription_progress_monitor():
-                                """转录进度监控线程"""
-                                current_progress = transcription_start_progress
-                                while not stop_progress.is_set() and current_progress < transcription_end_progress:
-                                    time.sleep(2)  # 每2秒更新一次
-                                    if not stop_progress.is_set():
-                                        current_progress += (transcription_end_progress - transcription_start_progress) * 0.1
-                                        if current_progress > transcription_end_progress:
-                                            current_progress = transcription_end_progress
-                                        
-                                        self.queue_manager.update_task_progress(
-                                            task.id,
-                                            current_progress,
-                                            f"正在转录文件: {file_name} ({int(current_progress)}%)"
-                                        )
-                            
-                            # 启动进度监控线程
-                            progress_thread = threading.Thread(target=transcription_progress_monitor, daemon=True)
-                            progress_thread.start()
-                            
-                            try:
-                                # 执行转录
-                                result = model.transcribe(audio)
-                                transcriptions.append(result)
-                            finally:
-                                # 停止进度监控
-                                stop_progress.set()
-                                if progress_thread.is_alive():
-                                    progress_thread.join(timeout=1)
-                            
-                            # 文件处理完成 - 更新进度
-                            file_complete_progress = 5 + (progress_step * (file_index + 1))
-                            self.queue_manager.update_task_progress(
-                                task.id, 
-                                file_complete_progress, 
-                                f"文件处理完成 {file_index + 1}/{total_files}: {file_name}"
-                            )
-                            
-                        except Exception as file_error:
-                            logger.error(f"[PROCESSOR] 处理文件 {file_path} 失败: {file_error}")
-                            raise file_error
-                    
-                    # 组装结果
-                    result = {
-                        'text': "\n".join([t.get('text', '') for t in transcriptions]),
-                        'segments': [seg for t in transcriptions for seg in t.get('segments', [])],
-                        'language': transcriptions[0].get('language', 'unknown') if transcriptions else 'unknown',
-                        'task_id': task.id
-                    }
-                    
-                    # 更新进度到85% - 开始组装结果
-                    self.queue_manager.update_task_progress(task.id, 85, "转录完成，正在组装结果...")
-                    
-                    # 更新进度到90% - 开始保存结果
-                    self.queue_manager.update_task_progress(task.id, 90, "正在保存转录结果...")
-                    
-                    # 保存转录结果到outputs目录
-                    try:
-                        saved_files = transcription_saver.save_transcription_result(task.__dict__, result)
-                        if saved_files:
-                            logger.info(f"[PROCESSOR] 任务 {task.id} 转录结果已保存到: {saved_files}")
-                            # 将保存的文件路径添加到结果中
-                            result['saved_files'] = saved_files
-                        else:
-                            logger.warning(f"[PROCESSOR] 任务 {task.id} 转录结果保存失败")
-                    except Exception as save_error:
-                        logger.error(f"[PROCESSOR] 保存转录结果失败 {task.id}: {save_error}")
-                    
-                    # 更新进度到95% - 保存完成
-                    self.queue_manager.update_task_progress(task.id, 95, "结果保存完成，准备完成...")
-                    
-                    # 短暂延迟，让用户看到完成过程
-                    import time
-                    time.sleep(0.5)
-                    
-                    # 更新进度到100% - 任务完成
-                    self.queue_manager.update_task_progress(task.id, 100, "任务处理完成！")
-                    
-                    # 将成功结果添加到results列表
-                    results.append(result)
-                    logger.info(f"[PROCESSOR] 任务 {task.id} 处理完成")
-                    
-                except Exception as e:
-                    logger.error(f"[PROCESSOR] 处理任务 {task.id} 失败: {e}", exc_info=True)
-                    results.append({'error': str(e), 'task_id': task.id})
+                if len(task.files) != 1:
+                    logger.error(f"[PROCESSOR] 任务 {task.id} 文件数量不为1: {len(task.files)}")
+                    continue
+                valid_tasks.append(task)
             
-            # 释放模型显存
-            del model
-            if device.startswith('cuda'):
-                torch.cuda.empty_cache()
-                
-            # 确保WebSocket心跳正常
-            import time
-            time.sleep(0.2)  # 增加休眠时间，给WebSocket更多响应机会
+            if not valid_tasks:
+                logger.warning(f"[PROCESSOR] 没有有效的任务")
+                return []
             
-            # 强制释放所有任务的显存分配
-            for task in tasks:
-                try:
-                    if hasattr(task, 'allocated_memory') and hasattr(task, 'allocated_gpu'):
-                        logger.info(f"[PROCESSOR] 强制释放任务 {task.id} 的显存分配")
-                        # 通过内存池释放显存
-                        if hasattr(self, 'memory_pool') and self.memory_pool:
-                            task_dict = task.to_dict()
-                            self.memory_pool.release_task_memory(task_dict)
-                        # 清理任务对象中的显存分配信息
-                        task.allocated_memory = None
-                        task.allocated_gpu = None
-                except Exception as mem_error:
-                    logger.error(f"[PROCESSOR] 释放任务 {task.id} 显存失败: {mem_error}")
+            # 使用whisper_system进行多文件并行处理
+            if self.whisper_system:
+                logger.info(f"[PROCESSOR] 使用whisper_system进行多文件并行处理")
+                results = self.whisper_system._process_single_task(gpu_id, valid_tasks)
+                logger.info(f"[PROCESSOR] whisper_system处理完成，成功: {sum(1 for r in results if r.get('success', False))}/{len(results)}")
+                return results
+            else:
+                logger.error(f"[PROCESSOR] whisper_system未初始化")
+                return [{'error': 'whisper_system未初始化', 'task_id': task.id} for task in valid_tasks]
             
-            # 再次清理GPU缓存
-            if device.startswith('cuda'):
-                torch.cuda.empty_cache()
-                # 强制垃圾回收
-                import gc
-                gc.collect()
-            
-            return results
         except Exception as e:
             logger.error(f"[PROCESSOR] 处理任务组失败: {e}", exc_info=True)
-            # 确保在异常时也释放模型
-            if 'model' in locals():
-                del model
-                if device.startswith('cuda'):
-                    torch.cuda.empty_cache()
-            
-            # 强制释放所有任务的显存分配
-            for task in tasks:
-                try:
-                    if hasattr(task, 'allocated_memory') and hasattr(task, 'allocated_gpu'):
-                        logger.info(f"[PROCESSOR] 异常情况下强制释放任务 {task.id} 的显存分配")
-                        # 通过内存池释放显存
-                        if hasattr(self, 'memory_pool') and self.memory_pool:
-                            task_dict = task.to_dict()
-                            self.memory_pool.release_task_memory(task_dict)
-                        # 清理任务对象中的显存分配信息
-                        task.allocated_memory = None
-                        task.allocated_gpu = None
-                except Exception as mem_error:
-                    logger.error(f"[PROCESSOR] 异常情况下释放任务 {task.id} 显存失败: {mem_error}")
-            
-            # 再次清理GPU缓存和垃圾回收
-            if device.startswith('cuda'):
-                torch.cuda.empty_cache()
-                import gc
-                gc.collect()
-            
-            # 返回包含错误的默认结果
-            return [{'error': str(e), 'task_id': 'unknown'} for _ in tasks]
+            return [{'error': str(e), 'task_id': task.id} for task in tasks]
 
     def _load_model(self, model_name: str, device: str, task_id: str = None):
-        """加载Whisper模型"""
+        """加载模型到指定设备 - 多文件处理优化版本"""
         try:
-            # 检查模型是否需要下载
+            # 从设备字符串中提取GPU ID
+            gpu_id = 0
+            if device.startswith('cuda:'):
+                gpu_id = int(device.split(':')[1])
+            
+            logger.info(f"[PROCESSOR] 开始加载模型 {model_name} 到 {device} (任务: {task_id})")
+            
+            # 多文件处理的关键：为每个任务创建独立的CUDA上下文
+            if device.startswith('cuda'):
+                try:
+                    # 1. 清理CUDA缓存
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    
+                    # 2. 设置设备
+                    torch.cuda.set_device(gpu_id)
+                    
+                    # 3. 再次清理和同步
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    
+                    # 4. 验证设备设置
+                    current_device = torch.cuda.current_device()
+                    if current_device != gpu_id:
+                        logger.warning(f"[PROCESSOR] GPU设备不匹配: 期望{gpu_id}, 实际{current_device}")
+                        torch.cuda.set_device(gpu_id)
+                        torch.cuda.synchronize()
+                    
+                    logger.info(f"[PROCESSOR] CUDA上下文准备完成，设备: {torch.cuda.current_device()}")
+                    
+                except Exception as cuda_error:
+                    logger.error(f"[PROCESSOR] CUDA上下文准备失败: {cuda_error}")
+                    raise RuntimeError(f"CUDA上下文异常: {cuda_error}")
+            
+            # 加载模型 - 使用独立的上下文
             import whisper
-            from pathlib import Path
-            
-            # 获取模型路径 - 修复：使用实际下载路径检查模型文件
-            model_file = os.path.join(config.MODEL_BASE_PATH, f"{model_name}.pt")
-            
-            # 严格检查模型文件是否存在且有效
-            model_needs_download = False
-            
-            # 检查模型文件是否存在
-            if not os.path.exists(model_file):
-                model_needs_download = True
-                logger.info(f"[PROCESSOR] 模型文件不存在: {model_file}")
-            else:
-                # 检查文件大小是否正常（至少1MB）
-                file_size = os.path.getsize(model_file)
-                if file_size < 1024 * 1024:  # 小于1MB认为文件损坏
-                    model_needs_download = True
-                    logger.info(f"[PROCESSOR] 模型文件可能损坏，大小异常: {file_size} bytes")
-                else:
-                    logger.info(f"[PROCESSOR] 模型文件已存在且有效: {model_file} ({file_size} bytes)")
-            
-            # 记录加载前的显存状态
-            gpu_id = 0  # 默认GPU ID
-            if device.startswith('cuda'):
-                gpu_id = int(device.split(':')[-1]) if ':' in device else 0
-            
-            # 获取预估显存
-            estimated_memory = self.memory_pool.estimate_memory_requirement(model_name)
-            
-            # 记录加载前显存
-            pre_load_memory = 0
-            if device.startswith('cuda'):
-                try:
-                    pre_load_memory = torch.cuda.memory_allocated(gpu_id) / (1024**3)  # 转换为GB
-                except Exception as e:
-                    logger.warning(f"[PROCESSOR] 获取加载前显存失败: {e}")
-            
-            # 只有在确实需要下载时才显示下载提示框
-            if model_needs_download:
-                logger.info(f"[PROCESSOR] 模型 {model_name} 需要下载，开始下载...")
-                
-                # 使用改进的下载进度监控
-                try:
-                    # 设置socketio实例到下载器
-                    model_downloader.socketio = self.socketio
-                    
-                    # 下载并加载模型（带进度监控）
-                    model = model_downloader.download_model_with_progress(
-                        model_name, task_id, config.MODEL_BASE_PATH
-                    )
-                    
-                except Exception as download_error:
-                    logger.error(f"[PROCESSOR] 模型 {model_name} 下载失败: {download_error}")
-                    # 尝试使用默认下载机制作为备选
-                    logger.info(f"[PROCESSOR] 尝试使用默认下载机制...")
-                    model = whisper.load_model(model_name, device=device, download_root=config.MODEL_BASE_PATH)
-            else:
-                # 模型已存在，直接加载
-                logger.info(f"[PROCESSOR] 模型 {model_name} 已存在，直接加载...")
-                model = whisper.load_model(model_name, device=device, download_root=config.MODEL_BASE_PATH)
-            
-            # 记录加载后的显存状态
-            post_load_memory = 0
-            if device.startswith('cuda'):
-                try:
-                    post_load_memory = torch.cuda.memory_allocated(gpu_id) / (1024**3)  # 转换为GB
-                except Exception as e:
-                    logger.warning(f"[PROCESSOR] 获取加载后显存失败: {e}")
-            
-            # 计算实际使用的显存
-            actual_memory_usage = post_load_memory - pre_load_memory
-            if actual_memory_usage < 0:
-                actual_memory_usage = 0  # 避免负值
-            
-            # 记录显存使用情况
             try:
-                self.memory_pool.record_actual_memory_usage(
-                    gpu_id=gpu_id,
-                    model_name=model_name,
-                    estimated_memory=estimated_memory,
-                    actual_memory=actual_memory_usage,
-                    task_id=task_id,
-                    success=True
-                )
-                logger.info(f"[PROCESSOR] 记录模型显存使用: {model_name} 预估{estimated_memory:.2f}GB 实际{actual_memory_usage:.2f}GB")
-            except Exception as record_error:
-                logger.error(f"[PROCESSOR] 记录显存使用失败: {record_error}")
+                # 关键：为每个任务创建独立的模型实例
+                model = whisper.load_model(model_name, device=device)
+                logger.info(f"[PROCESSOR] 模型 {model_name} 加载成功到 {device}")
+                
+            except Exception as load_error:
+                # 特殊处理CUDA设备端断言错误
+                if "device-side assert triggered" in str(load_error):
+                    logger.error(f"[PROCESSOR] CUDA设备端断言错误，尝试恢复")
+                    try:
+                        # 强制重置CUDA状态
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                        torch.cuda.set_device(gpu_id)
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                        
+                        # 等待一段时间让GPU状态稳定
+                        import time
+                        time.sleep(0.1)
+                        
+                        # 重新尝试加载
+                        model = whisper.load_model(model_name, device=device)
+                        logger.info(f"[PROCESSOR] 模型 {model_name} 恢复加载成功")
+                        
+                    except Exception as recovery_error:
+                        logger.error(f"[PROCESSOR] 模型恢复加载失败: {recovery_error}")
+                        raise RuntimeError(f"CUDA设备端断言错误，无法恢复: {load_error}")
+                else:
+                    raise load_error
             
-            logger.info(f"[PROCESSOR] 成功加载模型 {model_name} 到 {device}")
+            # 验证模型权重（简化验证，避免过度检查）
+            try:
+                # 只做基本检查，避免触发CUDA错误
+                if hasattr(model, 'encoder') and hasattr(model.encoder, 'blocks'):
+                    logger.info(f"[PROCESSOR] 模型 {model_name} 结构验证通过")
+                else:
+                    logger.warning(f"[PROCESSOR] 模型 {model_name} 结构可能异常")
+            except Exception as validation_error:
+                logger.warning(f"[PROCESSOR] 模型验证失败，但继续使用: {validation_error}")
+            
+            logger.info(f"[PROCESSOR] 成功加载模型 {model_name} 到 {device} (任务: {task_id})")
             return model
+            
         except Exception as e:
-            logger.error(f"[PROCESSOR] 加载模型 {model_name} 到 {device} 失败: {e}", exc_info=True)
+            logger.error(f"[PROCESSOR] 加载模型 {model_name} 失败 (任务: {task_id}): {e}", exc_info=True)
             raise
-    
-
 
     def _load_audio(self, file_path: str):
         """加载音频文件"""

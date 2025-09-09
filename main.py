@@ -351,25 +351,31 @@ def start_transcription():
         model = data.get('model', config.DEFAULT_MODEL)
         language = data.get('language', config.DEFAULT_LANGUAGE)
         gpus = data.get('gpus', config.DEFAULT_GPU_IDS)
-        output_format = data.get('output_format', 'json')
+        # 支持多选输出格式，兼容旧的单格式参数
+        output_formats = data.get('output_formats', [])
+        if not output_formats and 'output_format' in data:
+            # 兼容旧的单格式参数
+            output_formats = [data.get('output_format', 'txt')]
+        if not output_formats:
+            output_formats = ['txt']  # 默认输出格式
         
         if not files:
             return jsonify({'success': False, 'error': '没有选择文件'}), 400
         
         task_ids = []
         
-        # 使用优化系统提交任务
+        # 使用优化系统提交任务 - 一个文件对应一个任务
         if optimized_whisper_system:
             # 为每个文件创建单独的任务
             for filename in files:
                 task_id = str(uuid.uuid4())
                 task_data = {
                     'task_id': task_id,
-                    'files': [filename],
+                    'files': [filename],  # 每个任务只包含一个文件
                     'model': model,
                     'language': language,
                     'gpus': gpus,
-                    'output_format': output_format,
+                    'output_formats': output_formats,  # 使用多选输出格式
                     'user_id': 'web_user'  # 默认用户ID
                 }
                 
