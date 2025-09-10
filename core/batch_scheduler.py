@@ -123,6 +123,7 @@ class BatchTaskScheduler:
                 
                 # 获取所有可用的GPU状态
                 gpu_status = self.memory_pool.get_gpu_status()
+                logger.debug(f"[SCHEDULER] 获取GPU状态: {gpu_status}")
                 
                 # 为每个GPU调度任务
                 for gpu_id, status in gpu_status.items():
@@ -131,14 +132,17 @@ class BatchTaskScheduler:
                         
                     # 检查该GPU是否有可用显存
                     if status['available_memory'] > 1.0:  # 保留1GB安全边际
+                        logger.debug(f"[SCHEDULER] GPU{gpu_id}显存充足({status['available_memory']:.2f}GB)，开始调度任务")
                         self._schedule_tasks_for_gpu(gpu_id, status)
                     else:
                         # 显存不足时，确保队列中的任务保持待处理状态
+                        logger.debug(f"[SCHEDULER] GPU{gpu_id}显存不足({status['available_memory']:.2f}GB)，确保任务保持待处理状态")
                         self._ensure_pending_tasks_status(gpu_id, status)
                 
                 # 检查是否达到最大并发任务数
                 if self.queue_manager.current_tasks >= self.queue_manager.max_concurrent_tasks:
                     # 达到最大并发时，确保所有待处理任务保持待处理状态
+                    logger.debug(f"[SCHEDULER] 达到最大并发任务数({self.queue_manager.max_concurrent_tasks})，确保任务保持待处理状态")
                     self._ensure_pending_tasks_status(-1, {'available_memory': 0})  # 使用-1表示全局检查
                         
                 # 短暂休眠避免过度占用CPU，同时确保WebSocket心跳正常
@@ -156,7 +160,10 @@ class BatchTaskScheduler:
             # 获取等待中的任务
             pending_tasks = self._get_pending_tasks()
             if not pending_tasks:
+                logger.debug(f"[SCHEDULER] GPU{gpu_id}没有待处理任务")
                 return
+                
+            logger.debug(f"[SCHEDULER] GPU{gpu_id}找到{len(pending_tasks)}个待处理任务")
                 
             # 按模型分组任务
             tasks_by_model = defaultdict(list)
@@ -165,6 +172,7 @@ class BatchTaskScheduler:
                 
             # 为每个模型尝试批量调度
             for model_name, tasks in tasks_by_model.items():
+                logger.debug(f"[SCHEDULER] GPU{gpu_id}尝试调度{model_name}模型的{len(tasks)}个任务")
                 if not self.running:
                     break
                     
@@ -195,10 +203,15 @@ class BatchTaskScheduler:
                         # GPU特定检查（显存不足）
                         logger.info(f"[SCHEDULER] GPU{gpu_id}显存不足，重置任务 {task.id} 状态为待处理")
                     
-                    task.status = TaskStatus.PENDING
-                    task.updated_at = datetime.now()
-                    # 通知状态变更
-                    self.queue_manager._notify_status_change(task)
+                    # 只有非重试状态的任务才重置为待处理
+                    # 重试状态的任务应该保持重试状态，等待资源释放后重新调度
+                    if task.status != TaskStatus.RETRYING:
+                        task.status = TaskStatus.PENDING
+                        task.updated_at = datetime.now()
+                        # 通知状态变更
+                        self.queue_manager._notify_status_change(task)
+                    else:
+                        logger.info(f"[SCHEDULER] 任务 {task.id} 处于重试状态，保持重试状态等待资源释放")
                     
         except Exception as e:
             if gpu_id == -1:
@@ -207,7 +220,7 @@ class BatchTaskScheduler:
                 logger.error(f"[SCHEDULER] GPU{gpu_id}确保待处理任务状态出错: {e}", exc_info=True)
             
     def _get_pending_tasks(self) -> List[Task]:
-        """获取所有等待中的任务"""
+        """获取所有等待中的任务（包括待处理和重试状态）"""
         try:
             pending_tasks = []
             
@@ -219,13 +232,26 @@ class BatchTaskScheduler:
                 # 获取该模型的所有任务
                 model_tasks = self.queue_manager.get_tasks_by_model(model_name)
                 
-                # 筛选出等待中的任务
+                # 筛选出等待中的任务（包括待处理和重试状态）
                 for task in model_tasks:
-                    if task.status == TaskStatus.PENDING:
+                    if task.status in [TaskStatus.PENDING, TaskStatus.RETRYING]:
                         pending_tasks.append(task)
             
+            # 同时检查处理中的任务，看是否有需要启动转录的
+            processing_tasks = list(self.queue_manager.processing_tasks.values())
+            for task in processing_tasks:
+                # 检查任务是否已经在GPU分配中（表示已经开始转录）
+                task_in_gpu = any(task.id in gpu_tasks for gpu_tasks in self.gpu_allocations.values())
+                if not task_in_gpu:
+                    # 任务在处理中状态但没有在GPU分配中，需要启动转录
+                    pending_tasks.append(task)
+                    logger.info(f"[SCHEDULER] 发现处理中但未启动转录的任务 {task.id}")
+            
             if pending_tasks:
-                logger.info(f"[SCHEDULER] 找到 {len(pending_tasks)} 个等待中的任务")
+                pending_count = len([t for t in pending_tasks if t.status == TaskStatus.PENDING])
+                retry_count = len([t for t in pending_tasks if t.status == TaskStatus.RETRYING])
+                processing_count = len([t for t in pending_tasks if t.status == TaskStatus.PROCESSING])
+                logger.info(f"[SCHEDULER] 找到 {len(pending_tasks)} 个等待中的任务 (待处理: {pending_count}, 重试: {retry_count}, 处理中: {processing_count})")
             return pending_tasks
         except Exception as e:
             logger.error(f"[SCHEDULER] 获取等待任务失败: {e}", exc_info=True)
@@ -237,8 +263,11 @@ class BatchTaskScheduler:
             if not available_tasks:
                 return []
                 
-            # 按优先级排序任务
-            sorted_tasks = sorted(available_tasks, key=lambda t: t.priority.value, reverse=True)
+            # 按优先级和状态排序任务（重试任务优先，然后按优先级排序）
+            sorted_tasks = sorted(available_tasks, key=lambda t: (
+                t.status == TaskStatus.RETRYING,  # 重试任务优先
+                t.priority.value  # 然后按优先级排序
+            ), reverse=True)
             
             # 多文件并行处理：为每个任务分配独立模型
             batch_tasks = []
@@ -299,7 +328,11 @@ class BatchTaskScheduler:
             successful_tasks = []
             failed_tasks = []
             for task in batch_tasks[:]:  # 使用副本避免在迭代时修改列表
-                logger.info(f"[SCHEDULER] 尝试将任务 {task.id} 移动到处理状态")
+                task_status_info = f"状态: {task.status.value}"
+                if task.status == TaskStatus.RETRYING:
+                    task_status_info += f" (重试第{task.retry_count}次)"
+                logger.info(f"[SCHEDULER] 尝试将任务 {task.id} 移动到处理状态 - {task_status_info}")
+                
                 if not self.queue_manager.move_task_to_processing(task):
                     # 如果移动失败，释放显存并记录失败任务
                     logger.warning(f"[SCHEDULER] 无法将任务 {task.id} 移动到处理状态，释放已分配的显存")
@@ -309,17 +342,23 @@ class BatchTaskScheduler:
                     batch_tasks.remove(task)
                     logger.warning(f"[SCHEDULER] 已从批次中移除任务 {task.id}")
                 else:
-                    logger.info(f"[SCHEDULER] 成功将任务 {task.id} 移动到处理状态")
+                    logger.info(f"[SCHEDULER] 成功将任务 {task.id} 移动到处理状态，开始转录流程")
                     successful_tasks.append(task)
             
-            # 处理移动失败的任务
+            # 处理移动失败的任务 - 不标记为失败，保持待处理状态
             for task in failed_tasks:
-                        logger.warning(f"[SCHEDULER] 标记移动失败的任务 {task.id} 为失败")
+                        logger.info(f"[SCHEDULER] 任务 {task.id} 无法移动到处理状态，保持待处理状态等待资源释放")
                         file_path = task.files[0] if task.files else '未知文件'
                         filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'
-                        detailed_error = f"文件 {filename} 无法移动到处理状态"
                         
-                        self.queue_manager.fail_task(task.id, detailed_error)
+                        # 确保任务保持待处理状态，不标记为失败
+                        if task.status != TaskStatus.PENDING:
+                            task.status = TaskStatus.PENDING
+                            task.updated_at = datetime.now()
+                            logger.info(f"[SCHEDULER] 任务 {task.id} 状态已重置为待处理")
+                        
+                        # 任务已经在队列中，不需要重新加入
+                        logger.info(f"[SCHEDULER] 任务 {task.id} 保持在队列中等待下次调度")
                     
             if not successful_tasks:
                 logger.warning(f"[SCHEDULER] 没有任务成功移动到处理状态，批次执行中止")
@@ -334,6 +373,8 @@ class BatchTaskScheduler:
             logger.info(f"[SCHEDULER] GPU{gpu_id}开始处理{model_name}模型的{len(successful_tasks)}个任务: {[t.id for t in successful_tasks]}")
             
             # 使用whisper_system进行多文件并行处理
+            logger.info(f"[SCHEDULER] 检查转录执行条件: whisper_system={self.whisper_system is not None}, task_processor={self.task_processor is not None}")
+            
             if self.whisper_system and self.task_processor:
                 logger.info(f"[SCHEDULER] 使用whisper_system进行多文件并行处理")
                 # 在单独的线程中执行任务处理，避免阻塞调度器
@@ -350,7 +391,7 @@ class BatchTaskScheduler:
                 
                 logger.info(f"[SCHEDULER] 处理线程已启动，线程ID: {processing_thread.ident}")
             else:
-                logger.error("[SCHEDULER] 未设置whisper_system或任务处理器")
+                logger.error(f"[SCHEDULER] 未设置whisper_system或任务处理器 - whisper_system: {self.whisper_system is not None}, task_processor: {self.task_processor is not None}")
                 # 释放显存并标记任务失败
                 for task in successful_tasks:
                     try:
@@ -373,7 +414,7 @@ class BatchTaskScheduler:
                     
         except Exception as e:
             logger.error(f"[SCHEDULER] 执行批次任务出错: {e}", exc_info=True)
-            # 只对未成功移动到处理状态的任务进行失败处理
+            # 只对未成功移动到处理状态的任务进行清理，不标记为失败
             for task in batch_tasks:
                 try:
                     # 检查任务是否已经在处理中状态
@@ -382,14 +423,19 @@ class BatchTaskScheduler:
                         continue
                     
                     task_dict = task.to_dict()
-                    logger.warning(f"[SCHEDULER] 异常处理: 释放任务 {task.id} 的显存")
+                    logger.info(f"[SCHEDULER] 异常处理: 释放任务 {task.id} 的显存")
                     self.memory_pool.release_task_memory(task_dict)
-                    logger.warning(f"[SCHEDULER] 异常处理: 标记任务 {task.id} 为失败")
-                    file_path = task.files[0] if task.files else '未知文件'
-                    filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'
-                    detailed_error = f"文件 {filename} 调度执行错误: {str(e)}"
+                    logger.info(f"[SCHEDULER] 异常处理: 任务 {task.id} 保持待处理状态等待资源释放")
                     
-                    self.queue_manager.fail_task(task.id, detailed_error)
+                    # 确保任务保持待处理状态，不标记为失败
+                    if task.status != TaskStatus.PENDING:
+                        task.status = TaskStatus.PENDING
+                        task.updated_at = datetime.now()
+                        logger.info(f"[SCHEDULER] 任务 {task.id} 状态已重置为待处理")
+                    
+                    # 任务已经在队列中，不需要重新加入
+                    logger.info(f"[SCHEDULER] 任务 {task.id} 保持在队列中等待下次调度")
+                        
                 except Exception as inner_e:
                     logger.error(f"[SCHEDULER] 清理任务 {task.id} 时发生内部错误: {inner_e}", exc_info=True)
                                 
@@ -398,18 +444,23 @@ class BatchTaskScheduler:
         current_thread = threading.current_thread()
         try:
             logger.info(f"[PROCESSOR] 开始处理GPU{gpu_id}上的{model_name}模型任务组，任务数: {len(tasks)}")
+            logger.info(f"[PROCESSOR] 线程ID: {current_thread.ident}, 线程名: {current_thread.name}")
             
             # 使用whisper_system进行多文件并行处理
+            logger.info(f"[PROCESSOR] 检查处理器状态: whisper_system={self.whisper_system is not None}, task_processor={self.task_processor is not None}")
+            
             if self.whisper_system and self.task_processor:
                 logger.info(f"[PROCESSOR] 使用whisper_system进行多文件并行处理")
                 # 传递GPU ID和任务列表给处理器
                 results = self.task_processor(gpu_id, tasks)
                 
+                logger.info(f"[PROCESSOR] 处理器返回结果: {len(results) if results else 0}个结果")
+                
                 # 处理结果
                 self._handle_task_results(tasks, results)
             else:
                 # 处理器未设置，标记所有任务失败
-                logger.error(f"[PROCESSOR] whisper_system或任务处理器未设置")
+                logger.error(f"[PROCESSOR] whisper_system或任务处理器未设置 - whisper_system: {self.whisper_system is not None}, task_processor: {self.task_processor is not None}")
                 for task in tasks:
                     file_path = task.files[0] if task.files else '未知文件'
                     filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'

@@ -169,6 +169,12 @@ class IntelligentQueueManager:
         """将任务移动到处理中状态"""
         with self._lock:
             try:
+                # 先检查任务状态是否允许移动到处理中
+                if task.status not in [TaskStatus.PENDING, TaskStatus.RETRYING]:
+                    logger.warning(f"[QUEUE] 任务 {task.id} 状态 {task.status.value} 不允许移动到处理中")
+                    return False
+                
+                # 再检查并发数限制
                 if self.current_tasks >= self.max_concurrent_tasks:
                     logger.warning(f"[QUEUE] 达到最大并发任务数 {self.max_concurrent_tasks}")
                     return False
@@ -185,13 +191,19 @@ class IntelligentQueueManager:
                 if task.id in self._task_queue_mapping:
                     del self._task_queue_mapping[task.id]
                     
+                # 更新任务状态
+                previous_status = task.status.value
                 task.status = TaskStatus.PROCESSING
                 task.start_time = datetime.now()  # 设置开始时间
                 task.updated_at = datetime.now()
                 self.processing_tasks[task.id] = task
                 self.current_tasks += 1
                 self._notify_status_change(task)
-                logger.info(f"[QUEUE] 任务 {task.id} 进入处理状态, 当前处理中任务数: {self.current_tasks}")
+                
+                status_info = f"从 {previous_status} 状态"
+                if previous_status == TaskStatus.RETRYING.value:
+                    status_info += f" (重试第{task.retry_count}次)"
+                logger.info(f"[QUEUE] 任务 {task.id} {status_info} 进入处理状态, 当前处理中任务数: {self.current_tasks}")
                 return True
             except Exception as e:
                 logger.error(f"[QUEUE] 移动任务到处理状态失败: {e}", exc_info=True)
@@ -301,11 +313,12 @@ class IntelligentQueueManager:
                 
                 # 判断是否为转录错误，只有转录错误才重试
                 is_transcription_error = self._is_transcription_error(error)
+                logger.info(f"[QUEUE] 任务 {task_id} 错误分析: 转录错误={is_transcription_error}, 重试次数={task.retry_count}/{task.max_retries}")
                 
                 # 只有转录错误且重试次数未达上限才重试
                 if should_retry and is_transcription_error and task.retry_count < task.max_retries:
                     try:
-                        task.status = TaskStatus.PENDING  # 修复：重试任务应该设为PENDING状态
+                        task.status = TaskStatus.RETRYING  # 重试任务设为RETRYING状态
                         task.retry_count += 1
                         self.stats['total_retried'] += 1
                         
@@ -316,7 +329,7 @@ class IntelligentQueueManager:
                         self.queues[task.model].append(task)
                         # 更新映射
                         self._task_queue_mapping[task.id] = self.queues[task.model]
-                        logger.info(f"[QUEUE] 任务 {task_id} 失败, 将重试 (第{task.retry_count}次)")
+                        logger.info(f"[QUEUE] 任务 {task_id} 转录失败, 标记为重试状态 (第{task.retry_count}次)")
                     except Exception as e:
                         logger.error(f"[QUEUE] 重试任务 {task_id} 失败: {e}", exc_info=True)
                         return False
@@ -328,7 +341,12 @@ class IntelligentQueueManager:
                             del self.processing_tasks[task.id]
                             self.current_tasks -= 1
                         self.stats['total_failed'] += 1
-                        logger.info(f"[QUEUE] 任务 {task_id} 失败, 达到最大重试次数")
+                        
+                        # 记录失败原因
+                        if not is_transcription_error:
+                            logger.info(f"[QUEUE] 任务 {task_id} 非转录错误，直接标记为失败: {error}")
+                        else:
+                            logger.info(f"[QUEUE] 任务 {task_id} 转录错误但达到最大重试次数，标记为失败")
                     except Exception as e:
                         logger.error(f"[QUEUE] 标记任务 {task_id} 为失败状态失败: {e}", exc_info=True)
                         return False
@@ -494,10 +512,14 @@ class IntelligentQueueManager:
                 logger.info(f"[QUEUE] 当前处理中任务数已达上限 {self.max_concurrent_tasks}，跳过自动调度")
                 return
             
-            # 获取待处理任务
+            # 获取待处理任务（只包含PENDING和RETRYING状态的任务）
             pending_tasks = []
             for model_name, queue in self.queues.items():
-                pending_tasks.extend(list(queue))
+                for task in list(queue):
+                    if task.status in [TaskStatus.PENDING, TaskStatus.RETRYING]:
+                        pending_tasks.append(task)
+                    else:
+                        logger.debug(f"[QUEUE] 跳过非待处理状态的任务 {task.id}: {task.status.value}")
             
             if not pending_tasks:
                 logger.info("[QUEUE] 没有待处理任务，跳过自动调度")
