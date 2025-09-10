@@ -41,39 +41,18 @@ def transcribe_one(args: Tuple[int, str, str, str, str]) -> Dict[str, Any]:
         if not os.path.exists(full_path):
             raise FileNotFoundError(full_path)
 
-        # 启动进度监控线程
-        import threading
-        import time
-        stop_progress = threading.Event()
-        
-        def progress_updater():
-            """进度更新线程"""
-            current_progress = 20
-            while not stop_progress.is_set() and current_progress < 90:
-                time.sleep(2)  # 每2秒更新一次
-                if not stop_progress.is_set():
-                    current_progress += 5  # 每次增加5%
-                    if current_progress > 90:
-                        current_progress = 90
-                    
-                    # 记录进度到日志
-                    print(f"[PROGRESS] 任务 {task_id} 进度: {current_progress}%")
-        
-        # 启动进度监控线程
-        progress_thread = threading.Thread(target=progress_updater, daemon=True)
-        progress_thread.start()
-
+        # 加载模型 + 转录（使用.env中的下载路径）
+        from config import Config
+        # 确保目录存在
         try:
-            # 加载模型 + 转录
-            model = whisper.load_model(model_name, device="cuda")
-            result = model.transcribe(full_path)
-            del model
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-        finally:
-            # 停止进度监控
-            stop_progress.set()
-            progress_thread.join(timeout=1)
+            os.makedirs(Config.MODEL_BASE_PATH, exist_ok=True)
+        except Exception:
+            pass
+        model = whisper.load_model(model_name, device="cuda", download_root=Config.MODEL_BASE_PATH)
+        result = model.transcribe(full_path)
+        del model
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
         return {"task_id": task_id, "success": True, "result": result, "file_path": full_path}
 

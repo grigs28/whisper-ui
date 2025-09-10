@@ -247,6 +247,8 @@ class MemoryEstimationPool:
                         if memory_size is not None:
                             self.gpu_pools[gpu_id].release(memory_size)
                         logger.info(f"[MEMORY] 任务 {task.get('id', 'unknown')} 显存释放成功")
+                        # 显存释放后，触发调度器重新检查
+                        self._trigger_scheduler_recheck()
                     except Exception as pool_error:
                         logger.error(f"[MEMORY] GPU{gpu_id}显存池释放失败: {pool_error}", exc_info=True)
                 else:
@@ -507,3 +509,17 @@ class MemoryEstimationPool:
         except Exception as e:
             logger.error(f"[MEMORY] 获取最近记录失败: {e}", exc_info=True)
             return []
+    
+    def _trigger_scheduler_recheck(self):
+        """触发调度器重新检查待处理任务"""
+        try:
+            # 通过优化系统实例触发调度器重新检查
+            from core.optimized_whisper import get_optimized_system
+            system = get_optimized_system()
+            if system and hasattr(system, 'batch_scheduler'):
+                # 设置一个标志，让调度器知道需要重新检查
+                if hasattr(system.batch_scheduler, 'sync_counter'):
+                    system.batch_scheduler.sync_counter = 10  # 强制下次循环同步GPU状态
+                logger.info("[MEMORY] 已触发调度器重新检查待处理任务")
+        except Exception as e:
+            logger.error(f"[MEMORY] 触发调度器重新检查失败: {e}", exc_info=True)

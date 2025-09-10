@@ -132,6 +132,14 @@ class BatchTaskScheduler:
                     # 检查该GPU是否有可用显存
                     if status['available_memory'] > 1.0:  # 保留1GB安全边际
                         self._schedule_tasks_for_gpu(gpu_id, status)
+                    else:
+                        # 显存不足时，确保队列中的任务保持待处理状态
+                        self._ensure_pending_tasks_status(gpu_id, status)
+                
+                # 检查是否达到最大并发任务数
+                if self.queue_manager.current_tasks >= self.queue_manager.max_concurrent_tasks:
+                    # 达到最大并发时，确保所有待处理任务保持待处理状态
+                    self._ensure_pending_tasks_status(-1, {'available_memory': 0})  # 使用-1表示全局检查
                         
                 # 短暂休眠避免过度占用CPU，同时确保WebSocket心跳正常
                 time.sleep(1.0)  # 增加休眠时间，减少CPU占用，给WebSocket更多响应时间
@@ -168,6 +176,35 @@ class BatchTaskScheduler:
                     
         except Exception as e:
             logger.error(f"[SCHEDULER] GPU{gpu_id}任务调度出错: {e}", exc_info=True)
+    
+    def _ensure_pending_tasks_status(self, gpu_id: int, gpu_status: Dict[str, float]):
+        """确保显存不足或达到最大并发时队列中的任务保持待处理状态"""
+        try:
+            # 获取等待中的任务
+            pending_tasks = self._get_pending_tasks()
+            if not pending_tasks:
+                return
+            
+            # 检查是否有任务状态不正确
+            for task in pending_tasks:
+                if task.status != TaskStatus.PENDING:
+                    if gpu_id == -1:
+                        # 全局检查（达到最大并发）
+                        logger.info(f"[SCHEDULER] 达到最大并发任务数，重置任务 {task.id} 状态为待处理")
+                    else:
+                        # GPU特定检查（显存不足）
+                        logger.info(f"[SCHEDULER] GPU{gpu_id}显存不足，重置任务 {task.id} 状态为待处理")
+                    
+                    task.status = TaskStatus.PENDING
+                    task.updated_at = datetime.now()
+                    # 通知状态变更
+                    self.queue_manager._notify_status_change(task)
+                    
+        except Exception as e:
+            if gpu_id == -1:
+                logger.error(f"[SCHEDULER] 确保待处理任务状态出错: {e}", exc_info=True)
+            else:
+                logger.error(f"[SCHEDULER] GPU{gpu_id}确保待处理任务状态出错: {e}", exc_info=True)
             
     def _get_pending_tasks(self) -> List[Task]:
         """获取所有等待中的任务"""
@@ -235,8 +272,14 @@ class BatchTaskScheduler:
                         logger.info(f"[SCHEDULER] 达到最大批次大小限制: {self.max_batch_size}")
                         break
                 else:
-                    # 显存不足，停止添加更多任务
-                    logger.info(f"[SCHEDULER] GPU{gpu_id}显存不足，无法为任务 {task.id} 分配显存，停止添加更多任务")
+                    # 显存不足，停止添加更多任务，但确保任务保持待处理状态
+                    logger.info(f"[SCHEDULER] GPU{gpu_id}显存不足，无法为任务 {task.id} 分配显存，任务保持待处理状态")
+                    # 确保任务状态为待处理
+                    if task.status != TaskStatus.PENDING:
+                        task.status = TaskStatus.PENDING
+                        task.updated_at = datetime.now()
+                        logger.info(f"[SCHEDULER] 任务 {task.id} 状态已重置为待处理")
+                    # 显存不足时停止尝试调度后续任务
                     break
                     
             if batch_tasks:
@@ -271,8 +314,12 @@ class BatchTaskScheduler:
             
             # 处理移动失败的任务
             for task in failed_tasks:
-                logger.warning(f"[SCHEDULER] 标记移动失败的任务 {task.id} 为失败")
-                self.queue_manager.fail_task(task.id, "无法移动到处理状态")
+                        logger.warning(f"[SCHEDULER] 标记移动失败的任务 {task.id} 为失败")
+                        file_path = task.files[0] if task.files else '未知文件'
+                        filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'
+                        detailed_error = f"文件 {filename} 无法移动到处理状态"
+                        
+                        self.queue_manager.fail_task(task.id, detailed_error)
                     
             if not successful_tasks:
                 logger.warning(f"[SCHEDULER] 没有任务成功移动到处理状态，批次执行中止")
@@ -316,7 +363,11 @@ class BatchTaskScheduler:
                         logger.warning(f"[SCHEDULER] 释放任务 {task.id} 的显存")
                         self.memory_pool.release_task_memory(task_dict)
                         logger.warning(f"[SCHEDULER] 标记任务 {task.id} 为失败")
-                        self.queue_manager.fail_task(task.id, "whisper_system或任务处理器未设置")
+                        file_path = task.files[0] if task.files else '未知文件'
+                        filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'
+                        detailed_error = f"文件 {filename} 处理器未设置"
+                        
+                        self.queue_manager.fail_task(task.id, detailed_error)
                     except Exception as e:
                         logger.error(f"[SCHEDULER] 处理任务 {task.id} 时出错: {e}", exc_info=True)
                     
@@ -334,7 +385,11 @@ class BatchTaskScheduler:
                     logger.warning(f"[SCHEDULER] 异常处理: 释放任务 {task.id} 的显存")
                     self.memory_pool.release_task_memory(task_dict)
                     logger.warning(f"[SCHEDULER] 异常处理: 标记任务 {task.id} 为失败")
-                    self.queue_manager.fail_task(task.id, f"调度执行错误: {str(e)}")
+                    file_path = task.files[0] if task.files else '未知文件'
+                    filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'
+                    detailed_error = f"文件 {filename} 调度执行错误: {str(e)}"
+                    
+                    self.queue_manager.fail_task(task.id, detailed_error)
                 except Exception as inner_e:
                     logger.error(f"[SCHEDULER] 清理任务 {task.id} 时发生内部错误: {inner_e}", exc_info=True)
                                 
@@ -356,13 +411,21 @@ class BatchTaskScheduler:
                 # 处理器未设置，标记所有任务失败
                 logger.error(f"[PROCESSOR] whisper_system或任务处理器未设置")
                 for task in tasks:
-                    self.queue_manager.fail_task(task.id, "whisper_system或任务处理器未设置")
+                    file_path = task.files[0] if task.files else '未知文件'
+                    filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'
+                    detailed_error = f"文件 {filename} 处理器未设置"
+                    
+                    self.queue_manager.fail_task(task.id, detailed_error)
                     
         except Exception as e:
             logger.error(f"[PROCESSOR] 处理模型任务组出错: {e}", exc_info=True)
             # 标记所有任务失败
             for task in tasks:
-                self.queue_manager.fail_task(task.id, f"任务处理错误: {str(e)}")
+                file_path = task.files[0] if task.files else '未知文件'
+                filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'
+                detailed_error = f"文件 {filename} 任务处理错误: {str(e)}"
+                
+                self.queue_manager.fail_task(task.id, detailed_error)
             
         finally:
             # 确保释放GPU分配记录和显存
@@ -392,21 +455,35 @@ class BatchTaskScheduler:
                         if isinstance(result, dict) and result.get('error'):
                             # 任务处理出错
                             error_msg = result['error']
-                            logger.warning(f"[PROCESSOR] 任务 {task.id} 处理出错: {error_msg}")
-                            self.queue_manager.fail_task(task.id, error_msg)
+                            file_path = result.get('file_path', '未知文件')
+                            filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'
+                            
+                            # 构建详细的错误信息
+                            detailed_error = f"文件 {filename} 处理失败: {error_msg}"
+                            
+                            logger.warning(f"[PROCESSOR] 任务 {task.id} 处理出错: {detailed_error}")
+                            self.queue_manager.fail_task(task.id, detailed_error)
                         else:
                             # 任务处理成功
                             logger.info(f"[PROCESSOR] 任务 {task.id} 处理成功，标记为完成")
                             self.queue_manager.complete_task(task.id, result)
                     else:
                         # 没有对应结果，标记为失败
+                        file_path = task.files[0] if task.files else '未知文件'
+                        filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'
+                        detailed_error = f"文件 {filename} 处理无结果返回"
+                        
                         logger.warning(f"[PROCESSOR] 任务 {task.id} 无结果返回，标记为失败")
-                        self.queue_manager.fail_task(task.id, "任务处理无结果返回")
+                        self.queue_manager.fail_task(task.id, detailed_error)
                         
                 except Exception as e:
                     logger.error(f"[PROCESSOR] 处理任务{task.id}结果出错: {e}", exc_info=True)
                     try:
-                        self.queue_manager.fail_task(task.id, f"结果处理错误: {str(e)}")
+                        file_path = task.files[0] if task.files else '未知文件'
+                        filename = os.path.basename(file_path) if file_path != '未知文件' else '未知文件'
+                        detailed_error = f"文件 {filename} 结果处理错误: {str(e)}"
+                        
+                        self.queue_manager.fail_task(task.id, detailed_error)
                     except Exception as inner_e:
                         logger.error(f"[PROCESSOR] 标记任务{task.id}失败时出错: {inner_e}", exc_info=True)
             

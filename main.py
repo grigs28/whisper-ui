@@ -368,7 +368,10 @@ def start_transcription():
         if optimized_whisper_system:
             # 为每个文件创建单独的任务
             for filename in files:
-                task_id = str(uuid.uuid4())
+                # 使用文件名生成固定的任务ID，确保同一个文件使用同一个标签
+                import hashlib
+                task_id = hashlib.md5(f"{filename}_{model}_{language}".encode()).hexdigest()[:16]
+                
                 task_data = {
                     'task_id': task_id,
                     'files': [filename],  # 每个任务只包含一个文件

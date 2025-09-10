@@ -240,6 +240,13 @@ class IntelligentQueueManager:
                     logger.info(f"[QUEUE] 开始通知任务 {task_id} 状态变更")
                     self._notify_status_change(task)
                     logger.info(f"[QUEUE] 任务 {task_id} 状态变更通知完成")
+                    
+                    # 显存释放后，触发调度器重新评估待处理任务
+                    self._trigger_scheduler_recheck()
+                    
+                    # 尝试自动调度待处理任务
+                    self._try_schedule_pending_tasks()
+                    
                 except Exception as notify_error:
                     logger.warning(f"[QUEUE] 通知任务状态变更失败: {notify_error}")
                     # 通知失败不影响任务完成
@@ -292,8 +299,11 @@ class IntelligentQueueManager:
                     logger.error(f"[QUEUE] 更新失败任务 {task_id} 状态失败: {e}", exc_info=True)
                     return False
                 
-                # 如果需要重试且重试次数未达上限
-                if should_retry and task.retry_count < task.max_retries:
+                # 判断是否为转录错误，只有转录错误才重试
+                is_transcription_error = self._is_transcription_error(error)
+                
+                # 只有转录错误且重试次数未达上限才重试
+                if should_retry and is_transcription_error and task.retry_count < task.max_retries:
                     try:
                         task.status = TaskStatus.PENDING  # 修复：重试任务应该设为PENDING状态
                         task.retry_count += 1
@@ -334,6 +344,43 @@ class IntelligentQueueManager:
             except Exception as e:
                 logger.error(f"[QUEUE] 标记任务失败失败: {e}", exc_info=True)
                 return False
+    
+    def _is_transcription_error(self, error: str) -> bool:
+        """判断是否为转录错误，只有转录错误才重试"""
+        if not error:
+            return False
+        
+        # 转录相关的错误关键词
+        transcription_error_keywords = [
+            '转录', 'transcribe', 'whisper', '模型', 'model', 'audio', '音频',
+            'cuda', 'gpu', 'memory', '显存', 'out of memory', 'cuda out of memory',
+            'timeout', '超时', 'connection', '连接'
+        ]
+        
+        # 非转录错误关键词（这些错误不应该重试）
+        non_retry_keywords = [
+            '文件不存在', 'file not found', '无法移动到处理状态', '处理器未设置',
+            '调度执行错误', '结果处理错误', '处理无结果返回', '无法分配显存',
+            '显存不足', 'memory insufficient', 'invalid file', '不支持的文件格式'
+        ]
+        
+        error_lower = error.lower()
+        
+        # 先检查是否为非重试错误
+        for keyword in non_retry_keywords:
+            if keyword.lower() in error_lower:
+                logger.info(f"[QUEUE] 检测到非重试错误: {keyword}")
+                return False
+        
+        # 再检查是否为转录错误
+        for keyword in transcription_error_keywords:
+            if keyword.lower() in error_lower:
+                logger.info(f"[QUEUE] 检测到转录错误: {keyword}")
+                return True
+        
+        # 默认不重试
+        logger.info(f"[QUEUE] 未识别的错误类型，不重试: {error}")
+        return False
             
     def retry_task(self, task_id: str) -> bool:
         """重试任务"""
@@ -386,8 +433,8 @@ class IntelligentQueueManager:
                     # 确保进度在有效范围内
                     progress = max(0.0, min(100.0, progress))
                     
-                                    # 只有当进度有显著变化时才更新（避免过多通知）
-                if abs(task.progress - progress) >= 0.5 or progress >= 100.0:
+                    # 只有当进度有显著变化时才更新（降低阈值，提高响应性）
+                    if abs(task.progress - progress) >= 0.1 or progress >= 100.0:
                         task.progress = progress
                         task.updated_at = datetime.now()
                         
@@ -425,6 +472,90 @@ class IntelligentQueueManager:
                     
         except Exception as e:
             logger.error(f"[QUEUE] 通知进度更新失败: {e}", exc_info=True)
+    
+    def _trigger_scheduler_recheck(self):
+        """触发调度器重新检查待处理任务"""
+        try:
+            # 通过优化系统实例触发调度器重新检查
+            system = _get_optimized_system()
+            if system and hasattr(system, 'batch_scheduler'):
+                # 设置一个标志，让调度器知道需要重新检查
+                if hasattr(system.batch_scheduler, 'sync_counter'):
+                    system.batch_scheduler.sync_counter = 10  # 强制下次循环同步GPU状态
+                logger.info("[QUEUE] 已触发调度器重新检查待处理任务")
+        except Exception as e:
+            logger.error(f"[QUEUE] 触发调度器重新检查失败: {e}", exc_info=True)
+    
+    def _try_schedule_pending_tasks(self):
+        """尝试自动调度待处理任务"""
+        try:
+            # 检查是否还有可用的处理槽位
+            if self.current_tasks >= self.max_concurrent_tasks:
+                logger.info(f"[QUEUE] 当前处理中任务数已达上限 {self.max_concurrent_tasks}，跳过自动调度")
+                return
+            
+            # 获取待处理任务
+            pending_tasks = []
+            for model_name, queue in self.queues.items():
+                pending_tasks.extend(list(queue))
+            
+            if not pending_tasks:
+                logger.info("[QUEUE] 没有待处理任务，跳过自动调度")
+                return
+            
+            # 按优先级排序
+            pending_tasks.sort(key=lambda t: t.priority.value, reverse=True)
+            
+            # 尝试调度任务
+            scheduled_count = 0
+            for task in pending_tasks:
+                if self.current_tasks >= self.max_concurrent_tasks:
+                    break
+                
+                # 检查显存是否足够
+                if self._check_memory_availability(task):
+                    # 尝试移动到处理状态
+                    if self.move_task_to_processing(task):
+                        scheduled_count += 1
+                        logger.info(f"[QUEUE] 自动调度任务 {task.id} 到处理状态")
+                    else:
+                        logger.warning(f"[QUEUE] 自动调度任务 {task.id} 失败")
+                else:
+                    logger.info(f"[QUEUE] 任务 {task.id} 显存不足，跳过调度")
+                    break  # 显存不足时停止尝试调度后续任务
+            
+            if scheduled_count > 0:
+                logger.info(f"[QUEUE] 自动调度完成，成功调度 {scheduled_count} 个任务")
+                
+        except Exception as e:
+            logger.error(f"[QUEUE] 自动调度待处理任务失败: {e}", exc_info=True)
+    
+    def _check_memory_availability(self, task: Task) -> bool:
+        """检查任务是否有足够的显存"""
+        try:
+            from core.optimized_whisper import get_optimized_system
+            system = get_optimized_system()
+            if system and hasattr(system, 'memory_pool'):
+                # 获取GPU状态
+                gpu_status = system.memory_pool.get_gpu_status()
+                if not gpu_status:
+                    return False
+                
+                # 检查是否有GPU有足够显存
+                for gpu_id, status in gpu_status.items():
+                    if status['available_memory'] > 1.0:  # 保留1GB安全边际
+                        # 估算任务所需显存
+                        estimated_memory = system.memory_pool.get_estimated_memory_usage(gpu_id, task.model)
+                        if status['available_memory'] >= estimated_memory:
+                            return True
+                
+                return False
+            else:
+                return True  # 如果无法检查显存，默认允许调度
+                
+        except Exception as e:
+            logger.error(f"[QUEUE] 检查显存可用性失败: {e}", exc_info=True)
+            return True  # 出错时默认允许调度
                 
     def get_queue_stats(self) -> Dict[str, Any]:
         """获取队列统计信息"""

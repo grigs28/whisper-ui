@@ -113,6 +113,17 @@ class QueueManager {
                 border-radius: 4px;
                 transition: width 0.3s ease;
             }
+            
+            @keyframes progressGradient {
+                0% { background-position: 0% 50%; }
+                50% { background-position: 100% 50%; }
+                100% { background-position: 0% 50%; }
+            }
+            
+            @keyframes progressShine {
+                0% { transform: translateX(-100%); }
+                100% { transform: translateX(100%); }
+            }
         `;
         document.head.appendChild(style);
     }
@@ -543,21 +554,22 @@ class QueueManager {
                     </div>
                 </div>
                 ${item.status === 'processing' ? `
-                <div class="progress mb-2" style="height: 10px; border-radius: 5px; background-color: #f8f9fa;">
+                <div class="progress mb-2" style="height: 12px; border-radius: 6px; background-color: #f8f9fa; box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);">
                     <div class="progress-bar progress-bar-striped progress-bar-animated" 
                          role="progressbar" 
-                         style="width: ${item.progress || 0}%; background: linear-gradient(45deg, #007bff, #0056b3); border-radius: 5px; transition: width 0.3s ease;"
+                         style="width: ${item.progress || 0}%; background: linear-gradient(45deg, #007bff, #0056b3, #007bff); background-size: 200% 100%; animation: progressGradient 2s ease infinite; border-radius: 6px; transition: width 0.5s ease; position: relative; overflow: hidden;"
                          aria-valuenow="${item.progress || 0}" 
                          aria-valuemin="0" 
                          aria-valuemax="100">
+                        <div style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent); animation: progressShine 1.5s ease-in-out infinite;"></div>
                     </div>
                 </div>
                 <div class="d-flex justify-content-between align-items-center mb-1">
                     <small class="text-muted fw-medium">
-                        <i class="fas fa-cog fa-spin me-1"></i>
+                        <i class="fas fa-cog fa-spin me-1" style="color: #007bff;"></i>
                         ${item.message || '处理中...'}
                     </small>
-                    <small class="text-primary fw-bold">${Math.round(item.progress || 0)}%</small>
+                    <small class="text-primary fw-bold" style="font-size: 0.9em; background: linear-gradient(45deg, #007bff, #0056b3); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">${Math.round(item.progress || 0)}%</small>
                 </div>
                 ` : ''}
                 ${item.download_progress && item.status === 'processing' ? `
@@ -642,18 +654,42 @@ class QueueManager {
     updateTaskStatus(taskData) {
         statusLogger.system('***【updateTaskStatus】更新本地队列状态 ***');
         
-        // 更新本地队列状态
+        // 更新本地队列状态 - 确保同一个文件使用同一个标签
         const index = this.queueItems.findIndex(item => item.id === taskData.id);
         if (index !== -1) {
-            // 如果是进度更新，使用平滑过渡
+            // 找到现有任务，更新状态
             if (taskData.type === 'progress_update' && this.queueItems[index].progress !== taskData.progress) {
+                // 如果是进度更新，使用平滑过渡
                 this.smoothProgressUpdate(this.queueItems[index], taskData);
                 return; // 进度更新已经处理完毕，不需要后续步骤
             } else {
+                // 更新任务状态，保持同一个标签
                 this.queueItems[index] = { ...this.queueItems[index], ...taskData };
+                statusLogger.system(`【updateTaskStatus】更新现有任务 ${taskData.id} 状态: ${taskData.status}`);
             }
         } else {
-            this.queueItems.push(taskData);
+            // 检查是否是基于文件名的重复任务
+            const filename = taskData.filename || (taskData.files && taskData.files[0]);
+            if (filename) {
+                const existingIndex = this.queueItems.findIndex(item => 
+                    (item.filename === filename || (item.files && item.files[0] === filename)) &&
+                    item.model === taskData.model
+                );
+                
+                if (existingIndex !== -1) {
+                    // 找到基于文件名的现有任务，更新其ID和状态
+                    statusLogger.system(`【updateTaskStatus】发现重复文件 ${filename}，更新现有任务ID: ${this.queueItems[existingIndex].id} -> ${taskData.id}`);
+                    this.queueItems[existingIndex] = { ...this.queueItems[existingIndex], ...taskData };
+                } else {
+                    // 新任务，添加到队列
+                    this.queueItems.push(taskData);
+                    statusLogger.system(`【updateTaskStatus】添加新任务 ${taskData.id} 到队列`);
+                }
+            } else {
+                // 没有文件名信息，直接添加
+                this.queueItems.push(taskData);
+                statusLogger.system(`【updateTaskStatus】添加新任务 ${taskData.id} 到队列（无文件名信息）`);
+            }
         }
 
         // 记录任务状态变化
@@ -763,20 +799,23 @@ class QueueManager {
     }
 
     /**
-     * 平滑进度更新
+     * 平滑进度更新 - 优化版本，支持实时进度显示
      */
     smoothProgressUpdate(taskItem, newData) {
         const oldProgress = taskItem.progress || 0;
         const newProgress = newData.progress || 0;
         
-        // 如果进度变化很小，直接更新
-        if (Math.abs(newProgress - oldProgress) < 2) {
-            Object.assign(taskItem, newData);
+        // 直接更新数据，确保实时性
+        Object.assign(taskItem, newData);
+        
+        // 如果进度变化很小，只更新显示，不播放动画
+        if (Math.abs(newProgress - oldProgress) < 1) {
+            this.updateSingleTaskElement(taskItem);
             return;
         }
         
-        // 平滑过渡动画
-        const duration = 500; // 500ms过渡时间
+        // 对于较大的进度变化，使用平滑动画
+        const duration = 300; // 减少到300ms，提高响应性
         const startTime = Date.now();
         const startProgress = oldProgress;
         const progressDiff = newProgress - oldProgress;
@@ -789,17 +828,18 @@ class QueueManager {
             const easeProgress = this.easeInOutQuad(progress);
             const currentProgress = startProgress + (progressDiff * easeProgress);
             
-            taskItem.progress = Math.round(currentProgress * 10) / 10;
+            // 临时更新进度用于显示
+            const displayProgress = Math.round(currentProgress * 10) / 10;
             
             if (progress < 1) {
+                // 创建临时对象用于显示
+                const tempTaskItem = { ...taskItem, progress: displayProgress };
+                this.updateSingleTaskElement(tempTaskItem);
                 requestAnimationFrame(animate);
             } else {
-                // 动画完成，设置最终值
-                Object.assign(taskItem, newData);
+                // 动画完成，确保显示最终值
+                this.updateSingleTaskElement(taskItem);
             }
-            
-            // 更新显示
-            this.updateQueueDisplay(this.queueItems);
         };
         
         requestAnimationFrame(animate);

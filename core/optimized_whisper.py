@@ -108,8 +108,13 @@ class ModelDownloadProgress:
         self.download_urls = {}
     
     def download_model_with_progress(self, model_name: str, task_id: str = None, download_root: str = None):
-        """带进度监控的模型下载 - 使用改进的进度显示"""
+        """带真实进度监控的模型下载"""
         import os
+        import urllib.request
+        import urllib.parse
+        import hashlib
+        import tempfile
+        import shutil
         
         if download_root is None:
             download_root = config.MODEL_BASE_PATH
@@ -127,74 +132,37 @@ class ModelDownloadProgress:
             })
         
         try:
-            # 使用改进的进度显示方法
-            # 由于whisper.load_model()内部下载过程无法直接监控，
-            # 我们使用基于时间的进度估算，但比原来的虚假进度更准确
+            # 获取模型下载URL和文件信息
+            model_url, model_filename = self._get_model_download_info(model_name)
+            model_path = os.path.join(download_root, model_filename)
             
-            import whisper
-            import threading
-            import time
+            # 如果模型文件已存在，直接返回
+            if os.path.exists(model_path):
+                if self.socketio and task_id:
+                    self.socketio.emit('download_progress', {
+                        'task_id': task_id,
+                        'model_name': model_name,
+                        'progress': 100,
+                        'message': f'模型 {model_name} 已存在，跳过下载'
+                    })
+                logger.info(f"[DOWNLOAD] 模型 {model_name} 已存在，跳过下载")
+                return None
             
-            # 创建进度更新线程
-            progress_thread = None
-            stop_progress = threading.Event()
-            
-            def progress_updater():
-                """进度更新线程 - 使用更平滑和智能的进度显示"""
-                progress = 0
-                update_interval = 0.3  # 每0.3秒更新一次，更频繁
-                
-                # 根据模型大小调整进度增量
-                model_sizes = {
-                    'tiny': 3,      # 39MB
-                    'base': 2.5,    # 74MB
-                    'small': 2,     # 244MB
-                    'medium': 1.5,  # 769MB
-                    'large': 1      # 1550MB
-                }
-                
-                # 获取模型对应的增量，默认为1.5
-                increment = model_sizes.get(model_name, 1.5)
-                
-                # 使用非线性进度，开始时快，结束时慢
-                while not stop_progress.is_set() and progress < 95:
-                    time.sleep(update_interval)
-                    
-                    # 非线性进度：开始时增长快，接近95%时增长慢
-                    if progress < 30:
-                        # 前30%增长较快
-                        current_increment = increment * 1.5
-                    elif progress < 70:
-                        # 30%-70%正常增长
-                        current_increment = increment
-                    else:
-                        # 70%-95%增长较慢
-                        current_increment = increment * 0.7
-                    
-                    progress += current_increment
-                    if progress > 95:
-                        progress = 95
-                    
-                    if self.socketio and task_id:
-                        self.socketio.emit('download_progress', {
-                            'task_id': task_id,
-                            'model_name': model_name,
-                            'progress': int(progress),  # 确保是整数
-                            'message': f'正在下载模型 {model_name}... ({int(progress)}%)'
-                        })
-            
-            # 启动进度更新线程
-            progress_thread = threading.Thread(target=progress_updater, daemon=True)
-            progress_thread.start()
-            
+            # 使用临时文件下载
+            temp_file = None
             try:
-                # 实际下载模型（这会触发whisper的下载）
-                model = whisper.load_model(model_name, download_root=download_root)
+                # 创建临时文件
+                temp_fd, temp_file = tempfile.mkstemp(suffix='.pt')
+                os.close(temp_fd)
                 
-                # 停止进度更新
-                stop_progress.set()
-                if progress_thread:
-                    progress_thread.join(timeout=1)
+                # 下载文件并监控进度
+                self._download_file_with_progress(
+                    model_url, temp_file, model_name, task_id
+                )
+                
+                # 下载完成后移动到目标位置
+                shutil.move(temp_file, model_path)
+                temp_file = None  # 避免重复删除
                 
                 # 发送下载完成事件
                 if self.socketio and task_id:
@@ -206,14 +174,15 @@ class ModelDownloadProgress:
                     })
                 
                 logger.info(f"[DOWNLOAD] 模型 {model_name} 下载完成")
-                return model
+                return None
                 
-            except Exception as e:
-                # 停止进度更新
-                stop_progress.set()
-                if progress_thread:
-                    progress_thread.join(timeout=1)
-                raise
+            finally:
+                # 清理临时文件
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
                 
         except Exception as e:
             logger.error(f"[DOWNLOAD] 模型 {model_name} 下载失败: {e}")
@@ -226,6 +195,72 @@ class ModelDownloadProgress:
                     'message': f'模型 {model_name} 下载失败: {str(e)}'
                 })
             raise
+    
+    def _get_model_download_info(self, model_name: str):
+        """获取模型下载URL和文件名"""
+        # Whisper模型的下载URL和文件名映射
+        model_info = {
+            'tiny': ('https://openaipublic.azureedge.net/main/whisper/models/65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b2/tiny.pt', 'tiny.pt'),
+            'base': ('https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34/base.pt', 'base.pt'),
+            'small': ('https://openaipublic.azureedge.net/main/whisper/models/9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794/small.pt', 'small.pt'),
+            'medium': ('https://openaipublic.azureedge.net/main/whisper/models/345ae4da62f9b3d59415adc60127b97c714f32e89e936602e85993674d08dcb1/medium.pt', 'medium.pt'),
+            'large': ('https://openaipublic.azureedge.net/main/whisper/models/81f7c96c852ee8fc832187b0132e569d6c3065a3252ed18e56effd0b6a73e524/large-v2.pt', 'large-v2.pt'),
+            'large-v2': ('https://openaipublic.azureedge.net/main/whisper/models/81f7c96c852ee8fc832187b0132e569d6c3065a3252ed18e56effd0b6a73e524/large-v2.pt', 'large-v2.pt'),
+            'large-v3': ('https://openaipublic.azureedge.net/main/whisper/models/e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb/large-v3.pt', 'large-v3.pt')
+        }
+        
+        if model_name not in model_info:
+            raise ValueError(f"不支持的模型名称: {model_name}")
+        
+        return model_info[model_name]
+    
+    def _download_file_with_progress(self, url: str, filepath: str, model_name: str, task_id: str = None):
+        """下载文件并显示真实进度"""
+        import urllib.request
+        import urllib.error
+        
+        class ProgressReporter:
+            def __init__(self, socketio, task_id, model_name, total_size):
+                self.socketio = socketio
+                self.task_id = task_id
+                self.model_name = model_name
+                self.total_size = total_size
+                self.downloaded = 0
+                self.last_progress = -1
+            
+            def __call__(self, block_num, block_size, total_size):
+                self.downloaded += block_size
+                if total_size > 0:
+                    progress = int((self.downloaded / total_size) * 100)
+                    # 只在进度变化时发送事件，避免过于频繁
+                    if progress != self.last_progress and progress % 5 == 0:
+                        self.last_progress = progress
+                        if self.socketio and self.task_id:
+                            self.socketio.emit('download_progress', {
+                                'task_id': self.task_id,
+                                'model_name': self.model_name,
+                                'progress': progress,
+                                'message': f'正在下载模型 {self.model_name}... ({progress}%)'
+                            })
+        
+        try:
+            # 获取文件大小
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            
+            with urllib.request.urlopen(req) as response:
+                total_size = int(response.headers.get('Content-Length', 0))
+            
+            # 创建进度报告器
+            progress_reporter = ProgressReporter(self.socketio, task_id, model_name, total_size)
+            
+            # 下载文件
+            urllib.request.urlretrieve(url, filepath, progress_reporter)
+            
+        except urllib.error.URLError as e:
+            raise Exception(f"下载失败: {e}")
+        except Exception as e:
+            raise Exception(f"下载过程中出错: {e}")
     
 
 
@@ -464,25 +499,36 @@ class OptimizedWhisperSystem:
                 # 更新进度到20% - 开始转录
                 self.queue_manager.update_task_progress(task.id, 20, "正在转录...")
                 
-                # 启动转录进度监控线程
+                # 启动转录进度监控线程 - 优化版本，更频繁的进度更新
                 import threading
                 import time
                 stop_progress = threading.Event()
                 
                 def transcription_progress_monitor():
-                    """转录进度监控线程"""
+                    """转录进度监控线程 - 更真实的进度显示"""
                     current_progress = 20
+                    update_interval = 1.0  # 每1秒更新一次，提高响应性
+                    progress_increment = 3  # 每次增加3%，更平滑
+                    
                     while not stop_progress.is_set() and current_progress < 90:
-                        time.sleep(2)  # 每2秒更新一次
+                        time.sleep(update_interval)
                         if not stop_progress.is_set():
-                            current_progress += 5  # 每次增加5%
+                            current_progress += progress_increment
                             if current_progress > 90:
                                 current_progress = 90
+                            
+                            # 根据进度阶段显示不同的消息
+                            if current_progress < 40:
+                                message = f"正在初始化转录引擎... ({int(current_progress)}%)"
+                            elif current_progress < 70:
+                                message = f"正在分析音频内容... ({int(current_progress)}%)"
+                            else:
+                                message = f"正在生成转录文本... ({int(current_progress)}%)"
                             
                             self.queue_manager.update_task_progress(
                                 task.id,
                                 current_progress,
-                                f"正在转录文件: {os.path.basename(full_file_path)} ({int(current_progress)}%)"
+                                message
                             )
                 
                 # 启动进度监控线程
@@ -689,8 +735,13 @@ class OptimizedWhisperSystem:
             # 加载模型 - 使用独立的上下文
             import whisper
             try:
-                # 关键：为每个任务创建独立的模型实例
-                model = whisper.load_model(model_name, device=device)
+                # 关键：为每个任务创建独立的模型实例，并使用.env中的下载路径
+                from config import Config
+                try:
+                    os.makedirs(Config.MODEL_BASE_PATH, exist_ok=True)
+                except Exception:
+                    pass
+                model = whisper.load_model(model_name, device=device, download_root=Config.MODEL_BASE_PATH)
                 logger.info(f"[PROCESSOR] 模型 {model_name} 加载成功到 {device}")
                 
             except Exception as load_error:
@@ -709,8 +760,9 @@ class OptimizedWhisperSystem:
                         import time
                         time.sleep(0.1)
                         
-                        # 重新尝试加载
-                        model = whisper.load_model(model_name, device=device)
+                        # 重新尝试加载（带download_root）
+                        from config import Config
+                        model = whisper.load_model(model_name, device=device, download_root=Config.MODEL_BASE_PATH)
                         logger.info(f"[PROCESSOR] 模型 {model_name} 恢复加载成功")
                         
                     except Exception as recovery_error:

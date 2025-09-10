@@ -78,6 +78,8 @@ class TranscriptionController {
                 showNotification('转录任务已启动', 'success');
                 // 清空选中文件集合
                 fileManager.selectedFiles.clear();
+                // 清除所有上传文件复选框的选中状态
+                this.clearAllFileSelections();
                 // 更新UI
                 fileManager.updateSelectAllButton();
                 // 刷新任务队列显示
@@ -238,6 +240,29 @@ class TranscriptionController {
         
         // 初始化按钮文本
         updateButtonText();
+    }
+
+    /**
+     * 清除所有文件选择状态
+     */
+    clearAllFileSelections() {
+        try {
+            // 清除所有上传文件复选框的选中状态
+            const uploadedCheckboxes = document.querySelectorAll('.uploaded-file-checkbox');
+            uploadedCheckboxes.forEach(checkbox => {
+                checkbox.checked = false;
+            });
+            
+            // 清除全选复选框的选中状态
+            const selectAllCheckbox = document.getElementById('uploadedFileSelectAll');
+            if (selectAllCheckbox) {
+                selectAllCheckbox.checked = false;
+            }
+            
+            statusLogger.system('已清除所有文件选择状态');
+        } catch (error) {
+            statusLogger.error('清除文件选择状态时发生错误', { error: error.message });
+        }
     }
 }
 
