@@ -232,11 +232,14 @@ class BatchTaskScheduler:
                             task.updated_at = datetime.now()
                             self.queue_manager._notify_status_change(task)
                     elif task.status == TaskStatus.FAILED:
-                        # 失败的任务应该转到重试状态
-                        logger.info(f"[SCHEDULER] 失败任务 {task.id} 转到重试状态")
-                        task.status = TaskStatus.RETRYING
-                        task.updated_at = datetime.now()
-                        self.queue_manager._notify_status_change(task)
+                        # 检查重试次数，只有未达到最大重试次数的失败任务才转到重试状态
+                        if task.retry_count < task.max_retries:
+                            logger.info(f"[SCHEDULER] 失败任务 {task.id} 转到重试状态 (重试次数: {task.retry_count}/{task.max_retries})")
+                            task.status = TaskStatus.RETRYING
+                            task.updated_at = datetime.now()
+                            self.queue_manager._notify_status_change(task)
+                        else:
+                            logger.info(f"[SCHEDULER] 失败任务 {task.id} 已达到最大重试次数 {task.max_retries}，保持失败状态")
                     elif task.status not in [TaskStatus.RETRYING, TaskStatus.PROCESSING, TaskStatus.COMPLETED]:
                         # 其他未知状态，重置为待处理
                         logger.warning(f"[SCHEDULER] 重置未知状态任务 {task.id} ({task.status.value}) 为待处理")

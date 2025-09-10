@@ -315,8 +315,9 @@ class IntelligentQueueManager:
                 # 只有转录错误且重试次数未达上限才重试
                 if should_retry and is_transcription_error and task.retry_count < task.max_retries:
                     try:
-                        task.status = TaskStatus.RETRYING  # 重试任务设为RETRYING状态
+                        # 先增加重试次数
                         task.retry_count += 1
+                        task.status = TaskStatus.RETRYING  # 重试任务设为RETRYING状态
                         self.stats['total_retried'] += 1
                         
                         # 重新加入队列尾部（按要求修改）
@@ -326,7 +327,7 @@ class IntelligentQueueManager:
                         self.queues[task.model].append(task)
                         # 更新映射
                         self._task_queue_mapping[task.id] = self.queues[task.model]
-                        logger.info(f"[QUEUE] 任务 {task_id} 转录失败, 标记为重试状态 (第{task.retry_count}次)")
+                        logger.info(f"[QUEUE] 任务 {task_id} 转录失败, 标记为重试状态 (第{task.retry_count}次重试)")
                     except Exception as e:
                         logger.error(f"[QUEUE] 重试任务 {task_id} 失败: {e}", exc_info=True)
                         return False
@@ -343,7 +344,7 @@ class IntelligentQueueManager:
                         if not is_transcription_error:
                             logger.info(f"[QUEUE] 任务 {task_id} 非转录错误，直接标记为失败: {error}")
                         else:
-                            logger.info(f"[QUEUE] 任务 {task_id} 转录错误但达到最大重试次数，标记为失败")
+                            logger.info(f"[QUEUE] 任务 {task_id} 转录错误，已重试{task.retry_count}次，达到最大重试次数{task.max_retries}，标记为失败")
                     except Exception as e:
                         logger.error(f"[QUEUE] 标记任务 {task_id} 为失败状态失败: {e}", exc_info=True)
                         return False
