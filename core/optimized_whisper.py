@@ -10,12 +10,9 @@ import multiprocessing as mp
 from typing import Dict, List, Any, Optional, Callable
 from datetime import datetime
 
-# 关键：在任何torch导入之前设置spawn模式
-mp.set_start_method("spawn", force=True)
-
-# 延迟导入torch和whisper，避免父进程CUDA初始化
-torch = None
-whisper = None
+# 单文件处理模式：直接导入torch和whisper
+import torch
+import whisper
 
 from utils.logger import logger
 from core.queue_manager import IntelligentQueueManager, Task, TaskStatus, TaskPriority
@@ -308,7 +305,7 @@ class OptimizedWhisperSystem:
             self._initialize_gpu_pools()
             
             # 设置whisper_system作为任务处理器
-            self.batch_scheduler.set_whisper_system(self.whisper_system)
+            self.batch_scheduler.set_whisper_system(self)
             
             # 启动批量调度器
             self.batch_scheduler.start_scheduler()
@@ -425,7 +422,7 @@ class OptimizedWhisperSystem:
             raise
             
     def submit_task(self, task_data: Dict[str, Any]) -> str:
-        """提交转录任务 - 一个文件对应一个模型，支持多文件并行处理"""
+        """提交转录任务 - 一个文件对应一个任务，单文件处理"""
         try:
             # 验证任务数据
             files = task_data.get('files', [])
@@ -459,7 +456,16 @@ class OptimizedWhisperSystem:
             logger.error(f"[SYSTEM] 提交任务失败: {e}", exc_info=True)
             raise
     
-    # 任务处理相关函数已删除，现在使用批量调度器处理
+    # 任务处理相关函数 - 单文件处理
+    
+    def _process_single_task(self, task: Task, gpu_id: int) -> Dict[str, Any]:
+        """处理单个任务 - 供调度器调用的接口"""
+        try:
+            logger.info(f"[SYSTEM] 开始处理任务 {task.id} (GPU: {gpu_id})")
+            return self._process_single_file(task, gpu_id)
+        except Exception as e:
+            logger.error(f"[SYSTEM] 处理任务 {task.id} 失败: {e}", exc_info=True)
+            return {'success': False, 'error': str(e)}
     
     def _process_single_file(self, task: Task, gpu_id: int) -> Dict[str, Any]:
         """处理单个文件 - 一个文件对应一个模型"""
@@ -482,40 +488,61 @@ class OptimizedWhisperSystem:
             # 加载模型
             model = self._load_model(task.model, device, task.id)
             
-            # 记录模型加载后的显存使用情况
-            if device.startswith('cuda'):
-                try:
-                    torch.cuda.synchronize()
-                    actual_memory_usage = torch.cuda.memory_allocated(gpu_id) / (1024**3)  # 转换为GB
-                    estimated_memory = self.memory_pool.get_estimated_memory_usage(gpu_id, task.model)
-                    logger.info(f"[PROCESSOR] 记录模型显存使用: {task.model} 预估{estimated_memory:.2f}GB 实际{actual_memory_usage:.2f}GB")
-                    
-                    # 动态校准模型显存使用量
-                    self.calibrate_model_memory(gpu_id, task.model, actual_memory_usage)
-                except Exception as e:
-                    logger.warning(f"[PROCESSOR] 记录模型显存使用失败: {e}")
+            # 模型加载完成，准备开始转录
             
             try:
                 # 更新进度到20% - 开始转录
                 self.queue_manager.update_task_progress(task.id, 20, "正在转录...")
                 
-                # 启动转录进度监控线程 - 优化版本，更频繁的进度更新
+                # 启动基于音频时长的真实进度监控
                 import threading
                 import time
+                import wave
                 stop_progress = threading.Event()
                 
                 def transcription_progress_monitor():
-                    """转录进度监控线程 - 更真实的进度显示"""
-                    current_progress = 20
-                    update_interval = 1.0  # 每1秒更新一次，提高响应性
-                    progress_increment = 3  # 每次增加3%，更平滑
-                    
-                    while not stop_progress.is_set() and current_progress < 90:
-                        time.sleep(update_interval)
-                        if not stop_progress.is_set():
-                            current_progress += progress_increment
-                            if current_progress > 90:
-                                current_progress = 90
+                    """基于音频时长的真实转录进度监控"""
+                    try:
+                        # 获取音频时长
+                        audio_duration = self._get_audio_duration(full_file_path)
+                        logger.info(f"[PROCESSOR] 音频时长: {audio_duration:.2f}秒")
+                        
+                        # 根据模型和音频时长估算处理时间
+                        # 不同模型的处理速度不同
+                        model_speed_factors = {
+                            'tiny': 0.1,      # 最快
+                            'tiny.en': 0.1,
+                            'base': 0.15,
+                            'base.en': 0.15,
+                            'small': 0.25,
+                            'small.en': 0.25,
+                            'medium': 0.4,    # 中等
+                            'medium.en': 0.4,
+                            'large': 0.6,     # 较慢
+                            'large-v1': 0.6,
+                            'large-v2': 0.6,
+                            'large-v3': 0.6,
+                            'large-v3-turbo': 0.5,
+                            'turbo': 0.3
+                        }
+                        
+                        speed_factor = model_speed_factors.get(task.model, 0.4)
+                        estimated_processing_time = audio_duration * speed_factor
+                        
+                        logger.info(f"[PROCESSOR] 预估处理时间: {estimated_processing_time:.2f}秒")
+                        
+                        # 进度监控
+                        start_time = time.time()
+                        current_progress = 20
+                        update_interval = 0.5  # 每0.5秒更新一次
+                        
+                        while not stop_progress.is_set() and current_progress < 90:
+                            elapsed_time = time.time() - start_time
+                            
+                            # 基于已用时间计算进度
+                            if estimated_processing_time > 0:
+                                time_progress = min(elapsed_time / estimated_processing_time, 0.9)  # 最多到90%
+                                current_progress = 20 + int(time_progress * 70)  # 从20%到90%
                             
                             # 根据进度阶段显示不同的消息
                             if current_progress < 40:
@@ -525,6 +552,25 @@ class OptimizedWhisperSystem:
                             else:
                                 message = f"正在生成转录文本... ({int(current_progress)}%)"
                             
+                            self.queue_manager.update_task_progress(
+                                task.id,
+                                current_progress,
+                                message
+                            )
+                            
+                            time.sleep(update_interval)
+                            
+                    except Exception as e:
+                        logger.warning(f"[PROCESSOR] 进度监控失败，使用默认进度: {e}")
+                        # 如果获取音频时长失败，使用默认进度
+                        current_progress = 20
+                        while not stop_progress.is_set() and current_progress < 90:
+                            time.sleep(1.0)
+                            current_progress += 5
+                            if current_progress > 90:
+                                current_progress = 90
+                            
+                            message = f"正在转录... ({int(current_progress)}%)"
                             self.queue_manager.update_task_progress(
                                 task.id,
                                 current_progress,
@@ -569,12 +615,48 @@ class OptimizedWhisperSystem:
                 }
                 
             finally:
+                # 在释放显存前记录实际使用量
+                if device.startswith('cuda'):
+                    try:
+                        torch.cuda.synchronize()
+                        actual_memory_usage = torch.cuda.memory_allocated(gpu_id) / (1024**3)  # 转换为GB
+                        estimated_memory = self.memory_pool.get_estimated_memory_usage(gpu_id, task.model)
+                        
+                        # 记录实际显存使用情况（不进行校准）
+                        self.memory_pool.record_actual_memory_usage(
+                            gpu_id=gpu_id,
+                            model_name=task.model,
+                            estimated_memory=estimated_memory,
+                            actual_memory=actual_memory_usage,
+                            task_id=task.id,
+                            success=True
+                        )
+                        
+                        # 在终端输出实际显存使用量
+                        print(f"[显存使用] 任务 {task.id} 完成 - 实际显存使用: {actual_memory_usage:.2f}GB (预估: {estimated_memory:.2f}GB)")
+                        logger.info(f"[PROCESSOR] 任务 {task.id} 完成 - 实际显存使用: {actual_memory_usage:.2f}GB (预估: {estimated_memory:.2f}GB)")
+                    except Exception as e:
+                        logger.warning(f"[PROCESSOR] 记录显存使用失败: {e}")
+                
                 # 释放模型
                 del model
                 if device.startswith('cuda'):
                     self._safe_cuda_cleanup(gpu_id)
                 
         except Exception as e:
+            # 失败情况下需要清理显存和预估显存
+            try:
+                # 清理CUDA缓存
+                if device.startswith('cuda'):
+                    self._safe_cuda_cleanup(gpu_id)
+                
+                # 释放预估显存
+                task_dict = task.to_dict()
+                self.memory_pool.release_task_memory(task_dict)
+                logger.info(f"[PROCESSOR] 任务 {task.id} 失败，已清理显存和预估显存")
+            except Exception as cleanup_error:
+                logger.warning(f"[PROCESSOR] 清理失败任务 {task.id} 显存时出错: {cleanup_error}")
+            
             logger.error(f"[PROCESSOR] 处理文件失败: {e}", exc_info=True)
             raise
     
@@ -641,6 +723,28 @@ class OptimizedWhisperSystem:
     
     # 任务调度器已删除，现在使用批量调度器
     
+    def _get_audio_duration(self, file_path: str) -> float:
+        """获取音频文件时长"""
+        try:
+            # 尝试使用wave模块获取WAV文件时长
+            if file_path.lower().endswith('.wav'):
+                with wave.open(file_path, 'rb') as wav_file:
+                    frames = wav_file.getnframes()
+                    sample_rate = wav_file.getframerate()
+                    duration = frames / float(sample_rate)
+                    return duration
+            
+            # 对于其他格式，使用文件大小估算（粗略估算）
+            file_size = os.path.getsize(file_path)
+            # 假设平均比特率为128kbps，这是一个粗略估算
+            estimated_duration = file_size / (128 * 1024 / 8)  # 转换为秒
+            return max(estimated_duration, 1.0)  # 至少1秒
+            
+        except Exception as e:
+            logger.warning(f"[PROCESSOR] 获取音频时长失败: {e}")
+            # 如果获取失败，返回默认值
+            return 60.0  # 默认60秒
+    
     def _safe_cuda_cleanup(self, gpu_id: int):
         """安全的CUDA清理，不影响其他正在运行的任务"""
         try:
@@ -661,42 +765,9 @@ class OptimizedWhisperSystem:
             logger.warning(f"[PROCESSOR] GPU {gpu_id} 缓存清理出现警告: {e}")
             # 不抛出异常，避免影响其他任务
         
-    def _process_single_task(self, gpu_id: int, tasks: List[Task]) -> List[Dict[str, Any]]:
-        """
-        使用whisper_system进行多文件并行处理
-        关键：每个任务在独立的spawn进程中执行，避免CUDA上下文冲突
-        """
-        try:
-            logger.info(f"[PROCESSOR] 开始使用whisper_system处理 {len(tasks)} 个任务，GPU: {gpu_id}")
-            
-            # 验证所有任务都只有一个文件
-            valid_tasks = []
-            for task in tasks:
-                if len(task.files) != 1:
-                    logger.error(f"[PROCESSOR] 任务 {task.id} 文件数量不为1: {len(task.files)}")
-                    continue
-                valid_tasks.append(task)
-            
-            if not valid_tasks:
-                logger.warning(f"[PROCESSOR] 没有有效的任务")
-                return []
-            
-            # 使用whisper_system进行多文件并行处理
-            if self.whisper_system:
-                logger.info(f"[PROCESSOR] 使用whisper_system进行多文件并行处理")
-                results = self.whisper_system._process_single_task(gpu_id, valid_tasks)
-                logger.info(f"[PROCESSOR] whisper_system处理完成，成功: {sum(1 for r in results if r.get('success', False))}/{len(results)}")
-                return results
-            else:
-                logger.error(f"[PROCESSOR] whisper_system未初始化")
-                return [{'error': 'whisper_system未初始化', 'task_id': task.id} for task in valid_tasks]
-            
-        except Exception as e:
-            logger.error(f"[PROCESSOR] 处理任务组失败: {e}", exc_info=True)
-            return [{'error': str(e), 'task_id': task.id} for task in tasks]
 
     def _load_model(self, model_name: str, device: str, task_id: str = None):
-        """加载模型到指定设备 - 多文件处理优化版本"""
+        """加载模型到指定设备 - 单文件处理版本"""
         try:
             # 从设备字符串中提取GPU ID
             gpu_id = 0
@@ -705,9 +776,20 @@ class OptimizedWhisperSystem:
             
             logger.info(f"[PROCESSOR] 开始加载模型 {model_name} 到 {device} (任务: {task_id})")
             
-            # 多文件处理的关键：为每个任务创建独立的CUDA上下文
+            # 单文件处理：为任务创建CUDA上下文
             if device.startswith('cuda'):
                 try:
+                    # 检查CUDA是否可用
+                    if not torch.cuda.is_available():
+                        raise RuntimeError("CUDA不可用，请检查PyTorch CUDA安装")
+                    
+                    if torch.cuda is None:
+                        raise RuntimeError("torch.cuda为None，PyTorch CUDA未正确初始化")
+                    
+                    # 检查GPU ID是否有效
+                    if gpu_id >= torch.cuda.device_count():
+                        raise RuntimeError(f"GPU {gpu_id} 不存在，可用GPU数量: {torch.cuda.device_count()}")
+                    
                     # 1. 清理CUDA缓存
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
@@ -730,10 +812,12 @@ class OptimizedWhisperSystem:
                     
                 except Exception as cuda_error:
                     logger.error(f"[PROCESSOR] CUDA上下文准备失败: {cuda_error}")
-                    raise RuntimeError(f"CUDA上下文异常: {cuda_error}")
+                    # 如果CUDA不可用，回退到CPU
+                    logger.warning(f"[PROCESSOR] CUDA不可用，回退到CPU处理")
+                    device = "cpu"
+                    gpu_id = -1
             
             # 加载模型 - 使用独立的上下文
-            import whisper
             try:
                 # 关键：为每个任务创建独立的模型实例，并使用.env中的下载路径
                 from config import Config

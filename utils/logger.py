@@ -337,12 +337,25 @@ class WebSocketHandler(logging.Handler):
     def __init__(self, socketio):
         super().__init__()
         self.socketio = socketio
+        self.last_push_time = 0
+        self.push_interval = 0.1  # 默认推送间隔
+        
+        # 从配置中读取推送间隔
+        try:
+            from config import Config
+            self.push_interval = Config.LOG_PUSH_INTERVAL
+        except ImportError:
+            pass
 
     def emit(self, record):
         try:
             # 解析日志消息，提取时间戳和级别信息
             message = record.getMessage()
             level = record.levelname.lower()
+            
+            # 过滤掉一些频繁的调试日志，减少WebSocket推送
+            if self._should_skip_log(message, level):
+                return
             
             # 检查特殊日志类型并映射到相应级别
             if '[GPU_ALLOC]' in message:
@@ -368,27 +381,21 @@ class WebSocketHandler(logging.Handler):
             elif '[SUCCESS]' in message:
                 level = 'success'
             
-            # 根据日志级别设置颜色
-            level_colors = {
-                'debug': 'gray',
-                'info': 'blue',
-                'warning': 'orange',
-                'error': 'red',
-                'critical': 'red'
-            }
-            
             # 将日志消息按空格分割，提取时间戳和消息内容
-            # 由于我们已经修改了格式，应该能正确解析
             log_entry = {
                 'level': level,
                 'message': message,
                 'timestamp': datetime.fromtimestamp(record.created).strftime('%H:%M:%S')
             }
             
-            # 通过WebSocket发送日志到前端，添加错误处理
+            # 通过WebSocket发送日志到前端，添加错误处理和频率限制
             if self.socketio:
                 try:
-                    self.socketio.emit('log_message', log_entry)
+                    # 检查推送频率限制
+                    current_time = time.time()
+                    if current_time - self.last_push_time >= self.push_interval:
+                        self.socketio.emit('log_message', log_entry)
+                        self.last_push_time = current_time
                 except Exception as ws_error:
                     # WebSocket发送失败时不中断程序，只在控制台输出错误
                     print(f"WebSocket日志发送失败: {ws_error}")
@@ -400,5 +407,58 @@ class WebSocketHandler(logging.Handler):
             # 避免日志处理错误导致程序崩溃，只在控制台输出错误
             print(f"WebSocket日志处理器错误: {e}")
             pass
+    
+    def _should_skip_log(self, message, level):
+        """判断是否应该跳过某些日志"""
+        # 检查是否启用日志过滤
+        try:
+            from config import Config
+            if not Config.ENABLE_LOG_FILTERING:
+                return False
+        except ImportError:
+            pass
+        
+        # 跳过一些频繁的调试信息
+        skip_patterns = [
+            '找到',
+            '个等待中的任务',
+            'GPU',
+            '显存不足',
+            '调度器主循环',
+            '获取GPU状态',
+            '显存池',
+            '同步',
+            '心跳',
+            '检测',
+            'ping',
+            'pong'
+        ]
+        
+        # 对于debug级别的日志，应用更严格的过滤
+        if level == 'debug':
+            for pattern in skip_patterns:
+                if pattern in message:
+                    return True
+        
+        # 对于info级别的日志，只过滤最频繁的
+        if level == 'info':
+            frequent_patterns = [
+                '找到',
+                '个等待中的任务',
+                'GPU',
+                '显存不足',
+                '调度器主循环',
+                '显存池',
+                '同步',
+                '心跳',
+                '检测',
+                'ping',
+                'pong'
+            ]
+            for pattern in frequent_patterns:
+                if pattern in message:
+                    return True
+        
+        return False
 
 # 在应用启动时添加WebSocket处理器（需要在main.py中初始化）

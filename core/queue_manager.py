@@ -256,9 +256,6 @@ class IntelligentQueueManager:
                     # 显存释放后，触发调度器重新评估待处理任务
                     self._trigger_scheduler_recheck()
                     
-                    # 尝试自动调度待处理任务
-                    self._try_schedule_pending_tasks()
-                    
                 except Exception as notify_error:
                     logger.warning(f"[QUEUE] 通知任务状态变更失败: {notify_error}")
                     # 通知失败不影响任务完成
@@ -528,8 +525,7 @@ class IntelligentQueueManager:
             # 按优先级排序
             pending_tasks.sort(key=lambda t: t.priority.value, reverse=True)
             
-            # 尝试调度任务
-            scheduled_count = 0
+            # 只尝试调度一个任务（一个接一个处理）
             for task in pending_tasks:
                 if self.current_tasks >= self.max_concurrent_tasks:
                     break
@@ -538,16 +534,13 @@ class IntelligentQueueManager:
                 if self._check_memory_availability(task):
                     # 尝试移动到处理状态
                     if self.move_task_to_processing(task):
-                        scheduled_count += 1
                         logger.info(f"[QUEUE] 自动调度任务 {task.id} 到处理状态")
+                        logger.info(f"[QUEUE] 自动调度完成，成功调度 1 个任务")
                     else:
                         logger.warning(f"[QUEUE] 自动调度任务 {task.id} 失败")
                 else:
                     logger.info(f"[QUEUE] 任务 {task.id} 显存不足，跳过调度")
-                    break  # 显存不足时停止尝试调度后续任务
-            
-            if scheduled_count > 0:
-                logger.info(f"[QUEUE] 自动调度完成，成功调度 {scheduled_count} 个任务")
+                break  # 只调度一个任务就退出
                 
         except Exception as e:
             logger.error(f"[QUEUE] 自动调度待处理任务失败: {e}", exc_info=True)
@@ -582,6 +575,13 @@ class IntelligentQueueManager:
     def get_queue_stats(self) -> Dict[str, Any]:
         """获取队列统计信息"""
         with self._lock:
+            # 同步current_tasks与实际处理中任务数量
+            actual_processing_count = len(self.processing_tasks)
+            if self.current_tasks != actual_processing_count:
+                logger.warning(f"[QUEUE] 状态不一致: current_tasks={self.current_tasks}, 实际处理中任务数={actual_processing_count}")
+                self.current_tasks = actual_processing_count
+                logger.info(f"[QUEUE] 已同步current_tasks为{self.current_tasks}")
+            
             model_stats = {}
             for model_name, queue in self.queues.items():
                 model_stats[model_name] = {

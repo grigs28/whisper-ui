@@ -109,7 +109,7 @@ class Config:
     # ==================== 转录设置 ====================
     # 最大并发转录任务数，根据GPU显存和性能调整
     # 调用程序: main.py
-    MAX_CONCURRENT_TRANSCRIPTIONS = int(os.environ.get('MAX_CONCURRENT_TRANSCRIPTIONS', 5))
+    MAX_CONCURRENT_TRANSCRIPTIONS = int(os.environ.get('MAX_CONCURRENT_TRANSCRIPTIONS', 1))
     
     # 单个转录任务超时时间(秒)
     # 调用程序: main.py
@@ -181,13 +181,14 @@ class Config:
     # 调用程序: main.py
     ENABLE_ADAPTIVE_OPTIMIZATION = os.environ.get('ENABLE_ADAPTIVE_OPTIMIZATION', 'True').lower() == 'true'
     
-    # 最小批处理大小
-    # 调用程序: main.py, core/batch_scheduler.py
-    MIN_BATCH_SIZE = int(os.environ.get('MIN_BATCH_SIZE', 1))
+    # 单文件处理超时时间(秒)
+    # 调用程序: core/batch_scheduler.py
+    PROCESSING_TIMEOUT = float(os.environ.get('PROCESSING_TIMEOUT', 30))
     
-    # 最大批处理大小
-    # 调用程序: main.py, core/batch_scheduler.py
-    MAX_BATCH_SIZE = int(os.environ.get('MAX_BATCH_SIZE', 5))
+    # 日志推送频率控制
+    # 调用程序: utils/logger.py
+    LOG_PUSH_INTERVAL = float(os.environ.get('LOG_PUSH_INTERVAL', 0.1))  # 日志推送间隔(秒)
+    ENABLE_LOG_FILTERING = os.environ.get('ENABLE_LOG_FILTERING', 'True').lower() == 'true'  # 启用日志过滤
     
     # ==================== WebSocket配置 ====================
     # WebSocket连接超时时间(秒)

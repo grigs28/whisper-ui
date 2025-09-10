@@ -121,6 +121,10 @@ class WebSocketManager {
         });
 
         this.socket.on('log_message', (data) => {
+            // 检查日志面板是否折叠，如果折叠则跳过处理
+            if (typeof statusLogger !== 'undefined' && statusLogger.isCollapsed) {
+                return;
+            }
             this.handleLogMessage(data);
         });
 

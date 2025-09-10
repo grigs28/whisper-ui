@@ -62,10 +62,17 @@ class StatusLogger {
             this.logs.shift();
         }
 
-        // 1. 输出到UI日志面板（现有功能）
+        // 如果日志面板折叠，只记录到内存，不渲染到DOM
+        if (this.isCollapsed) {
+            // 折叠状态下只输出到控制台，不进行DOM操作
+            this.logToConsole(logEntry);
+            return;
+        }
+
+        // 1. 输出到UI日志面板（展开状态下）
         this.renderLog(logEntry);
         
-        // 2. 输出到浏览器控制台（新增）
+        // 2. 输出到浏览器控制台
         this.logToConsole(logEntry);
         
         // 3. 输出到WebSocket（新增）- 只在启用时发送
@@ -175,14 +182,37 @@ class StatusLogger {
             logPanel.classList.add('expanded');
             toggleIcon.classList.remove('fa-chevron-up');
             toggleIcon.classList.add('fa-chevron-down');
+            
+            // 展开时重新渲染所有日志
+            this.renderAllLogs();
         } else {
             // 折叠
             logPanel.classList.remove('expanded');
             logPanel.classList.add('collapsed');
             toggleIcon.classList.remove('fa-chevron-down');
             toggleIcon.classList.add('fa-chevron-up');
+            
+            // 折叠时清空DOM中的日志显示
+            if (this.container) {
+                this.container.innerHTML = '';
+            }
         }
         this.isCollapsed = !this.isCollapsed;
+    }
+    
+    /**
+     * 重新渲染所有日志（展开时使用）
+     */
+    renderAllLogs() {
+        if (!this.container) return;
+        
+        // 清空容器
+        this.container.innerHTML = '';
+        
+        // 重新渲染所有日志
+        this.logs.forEach(logEntry => {
+            this.renderLog(logEntry);
+        });
     }
 
     /**

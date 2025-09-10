@@ -116,11 +116,9 @@ class MemoryEstimationPool:
             logger.error(f"校准模型 {model_name} 在GPU {gpu_id} 的显存使用量失败: {e}", exc_info=True)
                    
     def get_estimated_memory_usage(self, gpu_id: int, model_name: str) -> float:
-        """获取模型预估显存使用量"""
+        """获取模型预估显存使用量 - 直接使用基础值，不进行校准"""
         try:
-            if gpu_id in self.gpu_pools:
-                return self.gpu_pools[gpu_id].get_model_estimation(model_name)
-            logger.debug(f"GPU {gpu_id} 未初始化显存池，使用默认估计")
+            # 直接返回基础预估，不使用校准后的值
             return self._get_default_estimation(model_name)
         except Exception as e:
             logger.error(f"获取GPU {gpu_id} 模型 {model_name} 预估显存失败: {e}", exc_info=True)
@@ -267,38 +265,10 @@ class MemoryEstimationPool:
             logger.error(f"[MEMORY] 释放任务 {task.get('id', 'unknown')} 显存失败: {e}", exc_info=True)
         
     def _calculate_duration_factor(self, task: Dict[str, Any]) -> float:
-        """根据音频时长计算显存影响因子 - 简化版本"""
-        try:
-            # 简化实现，实际应该根据音频文件计算时长
-            files = task.get('files', [])
-            if not files:
-                return 1.0
-                
-            # 假设每个文件平均时长，实际应该读取音频文件获取准确时长
-            estimated_total_duration = len(files) * 180  # 假设每个文件3分钟
-            
-            # 基于标准分段时长计算因子
-            if estimated_total_duration <= self.segment_duration:
-                return 1.0
-            else:
-                # 简化的时长因子计算 - 移除基础因子
-                segments = estimated_total_duration / self.segment_duration
-                
-                # 只保留长音频的额外缓冲
-                if segments > 10:  # 超过5分钟
-                    extra_buffer = (segments - 10) * 0.08
-                    return 1.0 + extra_buffer
-                
-                # 超长音频额外缓冲（超过10分钟）
-                if segments > 20:  # 超过10分钟
-                    extra_buffer = (segments - 20) * 0.05
-                    return 1.0 + extra_buffer
-                
-                # 短音频直接返回1.0
-                return 1.0
-        except Exception as e:
-            logger.error(f"计算任务 {task.get('id', 'unknown')} 时长因子失败: {e}", exc_info=True)
-            return 1.0
+        """显存影响因子 - 固定为1.0，文件总显存需求等于基础模型显存需求"""
+        # 根据需求：文件总显存需求等于基础模型显存需求
+        # 不再考虑音频时长对显存的影响
+        return 1.0
             
     def _get_default_estimation(self, model_name: str) -> float:
         """获取默认显存预估"""
@@ -315,22 +285,13 @@ class MemoryEstimationPool:
             return 5.0
 
     def estimate_memory_requirement(self, model_name: str, task: Dict[str, Any] = None) -> float:
-        """预估模型显存需求"""
+        """预估模型显存需求 - 直接使用基础值，不进行校准"""
         try:
-            # 获取基础预估
+            # 直接获取基础预估，不应用任何因子
             base_estimation = self._get_default_estimation(model_name)
             
-            # 如果有任务信息，计算时长因子
-            if task:
-                duration_factor = self._calculate_duration_factor(task)
-                # 应用时长因子和置信因子
-                final_estimation = base_estimation * duration_factor * self.confidence_factor
-            else:
-                # 只应用置信因子
-                final_estimation = base_estimation * self.confidence_factor
-            
-            logger.debug(f"显存预估: 模型{model_name} 基础{base_estimation:.2f}GB 最终{final_estimation:.2f}GB")
-            return final_estimation
+            logger.debug(f"显存预估: 模型{model_name} 基础值{base_estimation:.2f}GB")
+            return base_estimation
             
         except Exception as e:
             logger.error(f"预估模型{model_name}显存需求失败: {e}", exc_info=True)
